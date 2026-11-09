@@ -20,10 +20,12 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: Rust
+          workspaces: NtscCore
 
       - name: Build ntsc-rs static library (device)
-        working-directory: Rust
+        working-directory: NtscCore
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "16.0"
         run: cargo build --release --target aarch64-apple-ios
 
       - name: Install XcodeGen
