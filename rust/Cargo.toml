@@ -1,0 +1,16 @@
+[package]
+name = "vhs_ffi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+# Pinned to a release tag so the API this file uses doesn't drift.
+ntscrs = { git = "https://github.com/valadaptive/ntsc-rs", tag = "v0.9.4" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

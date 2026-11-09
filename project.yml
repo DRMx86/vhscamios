@@ -1,0 +1,26 @@
+name: VHSCam
+options:
+  bundleIdPrefix: com.drmx86
+  deploymentTarget:
+    iOS: "17.0"
+targets:
+  VHSCam:
+    type: application
+    platform: iOS
+    sources: [Sources]
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: VHS Cam
+        NSCameraUsageDescription: VHS Cam needs the camera to show and record the VHS effect.
+        NSMicrophoneUsageDescription: VHS Cam records audio with your videos.
+        NSPhotoLibraryAddUsageDescription: VHS Cam saves your photos and videos to your library.
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.drmx86.vhscam
+        SWIFT_VERSION: "5.0"
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/VHSCam-Bridging-Header.h
+        LIBRARY_SEARCH_PATHS: $(SRCROOT)/rust/lib
+        OTHER_LDFLAGS: [-lvhs_ffi, -lc++]
