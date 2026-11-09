@@ -22,7 +22,7 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('rust/Cargo.toml') }}
 
       - name: Build ntsc-rs static library (iOS device)
-        run: scripts/build_rust.sh aarch64-apple-ios
+        run: bash scripts/build_rust.sh aarch64-apple-ios
 
       - name: Install XcodeGen and generate project
         run: |
