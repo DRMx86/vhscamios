@@ -143,7 +143,11 @@ final class CameraManager: NSObject, ObservableObject,
 
         // Upright portrait buffers, so VHS scanlines run horizontally on screen.
         if let connection = videoOutput.connection(with: .video) {
-            if connection.isVideoRotationAngleSupported(90) { connection.videoRotationAngle = 90 }
+            if #available(iOS 17.0, *) {
+                if connection.isVideoRotationAngleSupported(90) { connection.videoRotationAngle = 90 }
+            } else if connection.isVideoOrientationSupported {
+                connection.videoOrientation = .portrait
+            }
             connection.isVideoMirrored = false
         }
         session.commitConfiguration()

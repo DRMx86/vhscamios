@@ -9,7 +9,7 @@ A camera app that runs the [ntsc-rs](https://github.com/ntsc-rs/ntsc-rs) VHS eff
 - 480p (authentic, fastest) or 720p
 
 ## How it works
-`Rust/` is a small static library (`ntsc_ios`) that wraps the `ntsc-rs` crate behind a C API.
+`NtscCore/` is a small static library (`ntsc_ios`) that wraps the `ntsc-rs` crate behind a C API.
 `VHSCam/` is a SwiftUI app: AVFoundation captures BGRA frames, each frame is processed in place by Rust,
 then shown via `AVSampleBufferDisplayLayer` and optionally written with `AVAssetWriter`.
 

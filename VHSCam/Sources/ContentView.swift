@@ -29,7 +29,7 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         .animation(.easeInOut(duration: 0.2), value: cam.statusMessage)
         .onAppear { cam.start() }
-        .onChange(of: scenePhase) { _, phase in
+        .onChange(of: scenePhase) { phase in
             if phase == .active { cam.start() } else { cam.stop() }
         }
         .alert("Camera access needed", isPresented: $cam.cameraDenied) {
