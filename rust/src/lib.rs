@@ -30,6 +30,6 @@ pub extern "C" fn ntsc_effect_process(
     let input_slice = unsafe { std::slice::from_raw_parts(input, width * height * 4) };
     let output_slice = unsafe { std::slice::from_raw_parts_mut(output, width * height * 4) };
 
-    // Apply the NTSC effect using the ntsc-rs crate's API
-    effect.apply_effect_to_buffer(input_slice, output_slice, width, height);
+    // Fixed: Pass dimensions as a tuple and provide the required [f32; 2] scale factor
+    effect.apply_effect_to_buffer((width, height), input_slice, output_slice, [1.0, 1.0]);
 }
