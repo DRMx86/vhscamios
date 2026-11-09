@@ -1,0 +1,48 @@
+name: Build iOS app
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust/Cargo.toml') }}
+
+      - name: Build ntsc-rs static library (iOS device)
+        run: scripts/build_rust.sh aarch64-apple-ios
+
+      - name: Install XcodeGen and generate project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build app (unsigned)
+        run: |
+          xcodebuild -project VHSCam.xcodeproj -scheme VHSCam \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" build
+
+      - name: Package unsigned IPA
+        run: |
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/VHSCam.app Payload/
+          zip -qr VHSCam-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VHSCam-unsigned-ipa
+          path: VHSCam-unsigned.ipa
