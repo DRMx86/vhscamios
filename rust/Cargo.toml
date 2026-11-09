@@ -7,8 +7,4 @@ edition = "2021"
 crate-type = ["staticlib", "cdylib", "lib"]
 
 [dependencies]
-# The Fix: Aliases the 'ntsc-rs' package as 'ntscrs'
 ntscrs = { package = "ntsc-rs", git = "https://github.com/valadaptive/ntsc-rs", tag = "v0.9.4" }
-
-# NOTE: If you have any other dependencies (like `serde`, `log`, etc.), 
-# paste them below this line exactly as they were in your original file.
