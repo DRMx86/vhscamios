@@ -1,0 +1,107 @@
+name: Build macOS app
+
+on:
+  push:
+    branches: [vhscam-macos]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MACOSX_DEPLOYMENT_TARGET: "14.0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: write # needed only to attach the zip to a release on v* tags
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (arm64 + x86_64 targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            NtscCore/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('NtscCore/Cargo.toml', 'NtscCore/src/**') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Build Rust library (universal)
+        working-directory: NtscCore
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p target/universal/release
+          lipo -create \
+            target/aarch64-apple-darwin/release/libntsc_ios.a \
+            target/x86_64-apple-darwin/release/libntsc_ios.a \
+            -output target/universal/release/libntsc_ios.a
+          lipo -info target/universal/release/libntsc_ios.a
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build app (Release, ad-hoc signed)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project VHSCamMac.xcodeproj \
+            -scheme VHSCamMac \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            build | tee xcodebuild.log
+
+      - name: Verify app bundle
+        run: |
+          APP="build/Build/Products/Release/VHS Cam.app"
+          test -d "$APP"
+          lipo -archs "$APP/Contents/MacOS/VHS Cam"
+          codesign -dv "$APP" 2>&1 || true
+
+      - name: Package zip
+        run: |
+          cd build/Build/Products/Release
+          ditto -c -k --sequesterRsrc --keepParent "VHS Cam.app" "$GITHUB_WORKSPACE/VHSCam-macOS.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VHSCam-macOS
+          path: VHSCam-macOS.zip
+          if-no-files-found: error
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: xcodebuild.log
+          if-no-files-found: ignore
+
+      - name: Attach to GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: VHSCam-macOS.zip
+          generate_release_notes: true
