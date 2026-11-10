@@ -1,0 +1,19 @@
+[package]
+name = "ntsc_ios"
+version = "0.2.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+# staticlib: iOS + macOS (linked by Xcode).  rlib: lets the Android JNI crate reuse the same code.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+# Core ntsc-rs effect library (MIT / ISC / Apache-2.0). Pinned for reproducible builds.
+ntsc-rs = { git = "https://github.com/ntsc-rs/ntsc-rs", rev = "8cfc51014092a6dc1da5eb0217bb9ae6516b124e" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"

@@ -1,0 +1,41 @@
+name: VHSCamMac
+options:
+  bundleIdPrefix: com.drmx86
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  VHSCamMac:
+    type: application
+    platform: macOS
+    sources:
+      - path: VHSCamMac/Sources
+    info:
+      path: VHSCamMac/Info.plist
+      properties:
+        CFBundleDisplayName: VHS Cam
+        LSMinimumSystemVersion: "14.0"
+        LSApplicationCategoryType: public.app-category.photography
+        # Lets AVCaptureDevice discovery list an iPhone used as a Continuity Camera.
+        NSCameraUseContinuityCameraDeviceType: true
+        NSCameraUsageDescription: VHS Cam uses the camera to apply a live VHS effect.
+        NSMicrophoneUsageDescription: VHS Cam records audio together with your VHS video.
+    settings:
+      base:
+        PRODUCT_NAME: VHS Cam
+        PRODUCT_BUNDLE_IDENTIFIER: com.drmx86.vhscam.mac
+        SWIFT_OBJC_BRIDGING_HEADER: VHSCamMac/Sources/VHSCamMac-Bridging-Header.h
+        # Not sandboxed (so it can write to ~/Movies and ~/Pictures) and ad-hoc signed.
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
+        ENABLE_HARDENED_RUNTIME: NO
+        ARCHS: "arm64 x86_64"
+        ONLY_ACTIVE_ARCH: NO
+        # Universal Rust static library produced by build-macos.sh / CI
+        LIBRARY_SEARCH_PATHS: $(SRCROOT)/NtscCore/target/universal/release
+        OTHER_LDFLAGS: "-lntsc_ios -lc++ -liconv"
