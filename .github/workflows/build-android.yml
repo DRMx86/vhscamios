@@ -2,7 +2,7 @@ name: Build Android app
 
 on:
   push:
-    branches: [vhscam-android]
+    branches-ignore: [main]
   pull_request:
   workflow_dispatch:
 
