@@ -98,10 +98,10 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         selectedLook = index
         push()
     }
-    fun setGrain(v: Float) { grain = v; custom() }
-    fun setColor(v: Float) { color = v; custom() }
-    fun setTracking(v: Float) { tracking = v; custom() }
-    fun setSoftness(v: Float) { softness = v; custom() }
+    fun updateGrain(v: Float) { grain = v; custom() }
+    fun updateColor(v: Float) { color = v; custom() }
+    fun updateTracking(v: Float) { tracking = v; custom() }
+    fun updateSoftness(v: Float) { softness = v; custom() }
     private fun custom() { selectedLook = -1; push() }
     private fun push() = Ntsc.setParams(handle, grain, color, tracking, softness, tape)
 
