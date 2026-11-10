@@ -3,9 +3,9 @@
 A camera app that runs the [ntsc-rs](https://github.com/ntsc-rs/ntsc-rs) VHS effect on live video.
 
 - **Back camera is the default** (flip button for the front camera)
-- Live preview with the effect applied, 30 fps
+- Live preview with the effect applied, 30 fps, in portrait and landscape (VHS noise band always at the bottom of the picture)
 - Photo and video capture (processed output saved to Photos, with audio)
-- Looks: Light / Classic / Worn Tape, plus an intensity slider
+- Six looks (Classic, Clean SP, Home Video, Muted, B&W, Worn Tape) plus live GRAIN / COLOR / DISTORTION / SOFTNESS sliders
 - 480p (authentic, fastest) or 720p
 
 ## How it works

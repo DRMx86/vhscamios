@@ -1,10 +1,16 @@
-//! Minimal C FFI around the ntsc-rs VHS effect, used by the VHSCam iOS app.
+//! C FFI around the ntsc-rs VHS effect, used by the VHS Cam iOS app.
 //! Frames are processed in place as BGRA8 (kCVPixelFormatType_32BGRA).
+//!
+//! Live "tape controls" (all 0..1 unless noted):
+//!   grain      - composite / luma / chroma noise and snow
+//!   color      - saturation multiplier (0 = black & white, 1 = natural, up to 2)
+//!   tracking   - distortion: head-switching band at the bottom, tracking noise, edge wobble
+//!   softness   - horizontal luma smear (blur)
+//!   tape_speed - 0 = SP (sharpest), 1 = LP, 2 = EP (softest / noisiest)
 
 use ntsc_rs::ctx::{self, Context};
 use ntsc_rs::settings::standard::{
-    HeadSwitchingMidLineSettings, UseField, VHSEdgeWaveSettings, VHSSharpenSettings,
-    VHSTapeSpeed,
+    HeadSwitchingMidLineSettings, UseField, VHSEdgeWaveSettings, VHSTapeSpeed,
 };
 use ntsc_rs::yiq_fielding::{
     pixel_bytes_for, Bgrx, BlitInfo, DeinterlaceMode, YiqField, YiqView,
@@ -12,8 +18,24 @@ use ntsc_rs::yiq_fielding::{
 use ntsc_rs::NtscEffect;
 use std::sync::Mutex;
 
+#[derive(Clone, Copy)]
+struct Params {
+    grain: f32,
+    color: f32,
+    tracking: f32,
+    softness: f32,
+    tape_speed: i32,
+}
+
+impl Default for Params {
+    fn default() -> Self {
+        Params { grain: 0.45, color: 1.0, tracking: 0.45, softness: 0.45, tape_speed: 1 }
+    }
+}
+
 struct State {
     effect: NtscEffect,
+    saturation: f32,
     yiq: Vec<f32>,
 }
 
@@ -21,89 +43,74 @@ pub struct NtscHandle {
     state: Mutex<State>,
 }
 
-/// Build an effect from a preset (0 = Light, 1 = Classic VHS, 2 = Worn Tape)
-/// and an intensity in 0.0..=1.0 that scales noise / tracking artifacts.
-fn build_effect(preset: i32, intensity: f32) -> NtscEffect {
-    let k = intensity.clamp(0.0, 1.0);
+fn build_effect(p: &Params) -> NtscEffect {
+    let g = p.grain.clamp(0.0, 1.0);
+    let d = p.tracking.clamp(0.0, 1.0);
+    let s = p.softness.clamp(0.0, 1.0);
+
     let mut e = NtscEffect::default();
     e.use_field = UseField::InterleavedUpper;
-    e.vhs_settings.enabled = true;
-    e.head_switching.enabled = true;
-    e.tracking_noise.enabled = true;
+    e.chroma_vert_blend = true;
+    e.luma_smear = 1.0 * s;
     e.ringing.enabled = true;
-    e.vhs_settings.settings.edge_wave.enabled = true;
+
+    // Tape
+    e.vhs_settings.enabled = true;
+    e.vhs_settings.settings.tape_speed = match p.tape_speed {
+        0 => VHSTapeSpeed::SP,
+        2 => VHSTapeSpeed::EP,
+        _ => VHSTapeSpeed::LP,
+    };
     e.vhs_settings.settings.sharpen.enabled = true;
 
-    match preset {
-        0 => {
-            e.vhs_settings.settings.tape_speed = VHSTapeSpeed::SP;
-            e.head_switching.settings.height = 4;
-            e.tracking_noise.settings.height = 6;
-            e.tracking_noise.settings.wave_intensity = 5.0 * k;
-            e.tracking_noise.settings.snow_intensity = 0.01 * k;
-            e.tracking_noise.settings.noise_intensity = 0.1 * k;
-            e.vhs_settings.settings.edge_wave.settings = VHSEdgeWaveSettings {
-                intensity: 0.25 * k,
-                ..Default::default()
-            };
-            e.composite_noise.settings.intensity = 0.03 * k;
-            e.chroma_noise.settings.intensity = 0.05 * k;
-        }
-        2 => {
-            e.vhs_settings.settings.tape_speed = VHSTapeSpeed::EP;
-            e.vhs_settings.settings.chroma_loss = 0.0003 * k;
-            e.head_switching.settings.height = 14;
-            e.head_switching.settings.horiz_shift = 120.0 * k;
-            e.head_switching.settings.mid_line.enabled = true;
-            e.head_switching.settings.mid_line.settings = HeadSwitchingMidLineSettings {
-                position: 0.92,
-                jitter: 0.08 * k,
-            };
-            e.tracking_noise.settings.height = 20;
-            e.tracking_noise.settings.wave_intensity = 30.0 * k;
-            e.tracking_noise.settings.snow_intensity = 0.06 * k;
-            e.tracking_noise.settings.noise_intensity = 0.5 * k;
-            e.vhs_settings.settings.edge_wave.settings = VHSEdgeWaveSettings {
-                intensity: 1.2 * k,
-                ..Default::default()
-            };
-            e.vhs_settings.settings.sharpen.settings = VHSSharpenSettings {
-                intensity: 0.4,
-                frequency: 1.0,
-            };
-            e.snow_intensity = 0.0008 * k;
-            e.composite_noise.settings.intensity = 0.09 * k;
-            e.chroma_noise.settings.intensity = 0.2 * k;
-            e.chroma_phase_noise_intensity = 0.004 * k;
-        }
-        _ => {
-            // Classic VHS: LP tape speed with the library defaults, scaled by intensity.
-            e.vhs_settings.settings.tape_speed = VHSTapeSpeed::LP;
-            e.tracking_noise.settings.wave_intensity = 15.0 * k;
-            e.tracking_noise.settings.snow_intensity = 0.025 * k;
-            e.tracking_noise.settings.noise_intensity = 0.25 * k;
-            e.vhs_settings.settings.edge_wave.settings = VHSEdgeWaveSettings {
-                intensity: 0.5 * k,
-                ..Default::default()
-            };
-            e.composite_noise.settings.intensity = 0.05 * k;
-            e.chroma_noise.settings.intensity = 0.1 * k;
-        }
-    }
+    // Grain
+    let grainy = g > 0.01;
+    e.composite_noise.enabled = grainy;
+    e.composite_noise.settings.intensity = 0.12 * g;
+    e.luma_noise.enabled = grainy;
+    e.luma_noise.settings.intensity = 0.15 * g;
+    e.chroma_noise.enabled = grainy;
+    e.chroma_noise.settings.intensity = 0.35 * g;
+    e.snow_intensity = 0.004 * g;
+    e.chroma_phase_noise_intensity = 0.006 * g;
+
+    // Distortion (the head-switching band and tracking noise render at the bottom of the frame)
+    let distorted = d > 0.02;
+    e.head_switching.enabled = distorted;
+    e.head_switching.settings.height = (3.0 + 14.0 * d) as i32;
+    e.head_switching.settings.horiz_shift = 10.0 + 110.0 * d;
+    e.head_switching.settings.mid_line.enabled = d > 0.6;
+    e.head_switching.settings.mid_line.settings = HeadSwitchingMidLineSettings {
+        position: 0.92,
+        jitter: 0.1 * d,
+    };
+    e.tracking_noise.enabled = distorted;
+    e.tracking_noise.settings.height = (4.0 + 18.0 * d) as i32;
+    e.tracking_noise.settings.wave_intensity = 35.0 * d;
+    e.tracking_noise.settings.snow_intensity = 0.05 * d;
+    e.tracking_noise.settings.noise_intensity = 0.5 * d;
+    e.vhs_settings.settings.edge_wave.enabled = distorted;
+    e.vhs_settings.settings.edge_wave.settings = VHSEdgeWaveSettings {
+        intensity: 1.5 * d,
+        ..Default::default()
+    };
     e
 }
 
-/// Create a processor. Free with `ntsc_destroy`.
+fn new_state(p: &Params) -> State {
+    State {
+        effect: build_effect(p),
+        saturation: p.color.clamp(0.0, 2.0),
+        yiq: Vec::new(),
+    }
+}
+
+/// Create a processor with default settings. Free with `ntsc_destroy`.
 #[no_mangle]
-pub extern "C" fn ntsc_create(preset: i32, intensity: f32) -> *mut NtscHandle {
+pub extern "C" fn ntsc_create() -> *mut NtscHandle {
     // Warm up the global context (thread pool) now rather than on the first frame.
     let _ = ctx::global();
-    let h = NtscHandle {
-        state: Mutex::new(State {
-            effect: build_effect(preset, intensity),
-            yiq: Vec::new(),
-        }),
-    };
+    let h = NtscHandle { state: Mutex::new(new_state(&Params::default())) };
     Box::into_raw(Box::new(h))
 }
 
@@ -114,15 +121,25 @@ pub extern "C" fn ntsc_destroy(handle: *mut NtscHandle) {
     }
 }
 
-/// Change preset / intensity while running (thread-safe).
+/// Update the live tape controls (thread-safe, takes effect on the next frame).
 #[no_mangle]
-pub extern "C" fn ntsc_set_preset(handle: *mut NtscHandle, preset: i32, intensity: f32) {
+pub extern "C" fn ntsc_set_params(
+    handle: *mut NtscHandle,
+    grain: f32,
+    color: f32,
+    tracking: f32,
+    softness: f32,
+    tape_speed: i32,
+) {
     if handle.is_null() {
         return;
     }
     let h = unsafe { &*handle };
+    let p = Params { grain, color, tracking, softness, tape_speed };
     if let Ok(mut s) = h.state.lock() {
-        s.effect = build_effect(preset, intensity);
+        let yiq = std::mem::take(&mut s.yiq);
+        *s = new_state(&p);
+        s.yiq = yiq;
     }
 }
 
@@ -158,6 +175,7 @@ pub extern "C" fn ntsc_process_bgra(
     if state.yiq.len() != needed {
         state.yiq = vec![0.0; needed];
     }
+    let saturation = state.saturation;
 
     let buf = unsafe { std::slice::from_raw_parts_mut(pixels, rb * h_px) };
     let blit = BlitInfo::from_full_frame(w, h_px, rb);
@@ -167,6 +185,17 @@ pub extern "C" fn ntsc_process_bgra(
     state
         .effect
         .apply_effect_to_yiq(ctx, &mut view, frame, [1.0, 1.0]);
+
+    // Color knob: scale the chroma planes (0 = black & white).
+    if (saturation - 1.0).abs() > 1e-3 {
+        for v in view.i.iter_mut() {
+            *v *= saturation;
+        }
+        for v in view.q.iter_mut() {
+            *v *= saturation;
+        }
+    }
+
     view.write_to_strided_buffer::<Bgrx, u8, _>(ctx, buf, blit, DeinterlaceMode::Bob, ());
     0
 }

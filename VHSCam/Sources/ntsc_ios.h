@@ -4,10 +4,13 @@
 
 typedef struct NtscHandle NtscHandle;
 
-/// preset: 0 = Light, 1 = Classic VHS, 2 = Worn Tape. intensity: 0.0 ... 1.0
-NtscHandle *ntsc_create(int32_t preset, float intensity);
+NtscHandle *ntsc_create(void);
 void ntsc_destroy(NtscHandle *handle);
-void ntsc_set_preset(NtscHandle *handle, int32_t preset, float intensity);
+
+/// grain, tracking (distortion), softness: 0...1. color: 0...2 (0 = black & white, 1 = natural).
+/// tape_speed: 0 = SP, 1 = LP, 2 = EP.
+void ntsc_set_params(NtscHandle *handle, float grain, float color, float tracking,
+                     float softness, int32_t tape_speed);
 
 /// Applies the VHS effect in place to a BGRA8 frame. Returns 0 on success.
 int32_t ntsc_process_bgra(NtscHandle *handle, uint8_t *pixels, uint32_t width,

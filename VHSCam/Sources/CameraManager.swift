@@ -11,11 +11,30 @@ final class CameraManager: NSObject, ObservableObject,
 
     enum CaptureMode { case photo, video }
 
+    struct Look {
+        let name: String
+        let grain, color, tracking, softness: Double
+        let tape: Int   // 0 = SP, 1 = LP, 2 = EP
+    }
+
+    static let looks: [Look] = [
+        Look(name: "Classic",  grain: 0.45, color: 1.00, tracking: 0.45, softness: 0.45, tape: 1),
+        Look(name: "Clean SP", grain: 0.15, color: 0.85, tracking: 0.15, softness: 0.25, tape: 0),
+        Look(name: "Home Video", grain: 0.25, color: 1.15, tracking: 0.10, softness: 0.30, tape: 0),
+        Look(name: "Muted",    grain: 0.35, color: 0.45, tracking: 0.35, softness: 0.50, tape: 1),
+        Look(name: "B&W",      grain: 0.50, color: 0.00, tracking: 0.35, softness: 0.40, tape: 1),
+        Look(name: "Worn Tape", grain: 0.80, color: 0.80, tracking: 0.85, softness: 0.70, tape: 2)
+    ]
+
     // MARK: Published UI state (main thread)
     @Published var position: AVCaptureDevice.Position = .back   // back camera is the default
     @Published var captureMode: CaptureMode = .video
-    @Published var preset: Int = 1 { didSet { pushEffectSettings() } }        // 0 light, 1 classic, 2 worn
-    @Published var intensity: Double = 0.7 { didSet { pushEffectSettings() } }
+    // Live "tape controls". Moving any of them switches the look to "custom".
+    @Published var grain: Double = 0.45 { didSet { controlChanged() } }
+    @Published var color: Double = 1.0 { didSet { controlChanged() } }       // 0 = B&W, 1 = natural, 1.5 = vivid
+    @Published var tracking: Double = 0.45 { didSet { controlChanged() } }   // distortion
+    @Published var softness: Double = 0.45 { didSet { controlChanged() } }
+    @Published var selectedLook: Int? = 0
     @Published var useHD = false
     @Published var isRecording = false
     @Published var recordingSeconds = 0
@@ -40,6 +59,12 @@ final class CameraManager: NSObject, ObservableObject,
     // MARK: ntsc-rs
     private var handle: OpaquePointer?
     private var frameCounter: UInt64 = 0
+    private var tapeSpeed = 1
+    private var applyingLook = false
+
+    // MARK: Orientation (buffers follow how the phone is held, so VHS scanlines and the
+    // head-switching band are always horizontal / at the bottom of the picture)
+    private var captureOrientation: AVCaptureVideoOrientation = .portrait   // sessionQueue only
 
     // MARK: Recording / photo state (touched only on mediaQueue)
     private var wantsRecording = false
@@ -54,18 +79,27 @@ final class CameraManager: NSObject, ObservableObject,
 
     override init() {
         super.init()
-        handle = ntsc_create(Int32(preset), Float(intensity))
+        handle = ntsc_create()
         displayLayer.videoGravity = .resizeAspect
         displayLayer.backgroundColor = UIColor.black.cgColor
+        select(look: 0)
+
+        UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(deviceOrientationChanged),
+            name: UIDevice.orientationDidChangeNotification, object: nil)
     }
 
     deinit {
+        NotificationCenter.default.removeObserver(self)
+        UIDevice.current.endGeneratingDeviceOrientationNotifications()
         if let handle { ntsc_destroy(handle) }
     }
 
     // MARK: Lifecycle
 
     func start() {
+        updateOrientation()
         requestPermissions { [weak self] videoGranted in
             guard let self else { return }
             guard videoGranted else {
@@ -141,15 +175,7 @@ final class CameraManager: NSObject, ObservableObject,
             outputsAdded = true
         }
 
-        // Upright portrait buffers, so VHS scanlines run horizontally on screen.
-        if let connection = videoOutput.connection(with: .video) {
-            if #available(iOS 17.0, *) {
-                if connection.isVideoRotationAngleSupported(90) { connection.videoRotationAngle = 90 }
-            } else if connection.isVideoOrientationSupported {
-                connection.videoOrientation = .portrait
-            }
-            connection.isVideoMirrored = false
-        }
+        applyOrientation()
         session.commitConfiguration()
 
         // 30 fps keeps the effect real-time.
@@ -158,11 +184,39 @@ final class CameraManager: NSObject, ObservableObject,
             device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
             device.unlockForConfiguration()
         }
+    }
 
-        DispatchQueue.main.async {
-            // Mirror the selfie preview only; saved media is not mirrored.
-            self.displayLayer.transform = position == .front
-                ? CATransform3DMakeScale(-1, 1, 1) : CATransform3DIdentity
+    // MARK: Orientation
+
+    @objc private func deviceOrientationChanged() {
+        guard !isRecording else { return }   // keep buffer size constant while recording
+        updateOrientation()
+    }
+
+    private func updateOrientation() {
+        let orientation: AVCaptureVideoOrientation
+        switch UIDevice.current.orientation {
+        case .portrait:        orientation = .portrait
+        case .landscapeLeft:   orientation = .landscapeRight   // device/capture landscape are mirrored names
+        case .landscapeRight:  orientation = .landscapeLeft
+        default: return                                       // upside down, flat, unknown: keep current
+        }
+        sessionQueue.async {
+            self.captureOrientation = orientation
+            self.applyOrientation()
+        }
+    }
+
+    /// Must run on sessionQueue (or inside session configuration).
+    private func applyOrientation() {
+        guard let connection = videoOutput.connection(with: .video) else { return }
+        if connection.isVideoOrientationSupported {
+            connection.videoOrientation = captureOrientation
+        }
+        // Never mirror: preview and saved media look the same, front camera included.
+        if connection.isVideoMirroringSupported {
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = false
         }
     }
 
@@ -184,9 +238,32 @@ final class CameraManager: NSObject, ObservableObject,
         reconfigure()
     }
 
-    private func pushEffectSettings() {
+    // MARK: Looks and tape controls
+
+    func select(look index: Int) {
+        guard Self.looks.indices.contains(index) else { return }
+        let look = Self.looks[index]
+        applyingLook = true
+        grain = look.grain
+        color = look.color
+        tracking = look.tracking
+        softness = look.softness
+        tapeSpeed = look.tape
+        applyingLook = false
+        selectedLook = index
+        pushParams()
+    }
+
+    private func controlChanged() {
+        guard !applyingLook else { return }
+        selectedLook = nil
+        pushParams()
+    }
+
+    private func pushParams() {
         guard let handle else { return }
-        ntsc_set_preset(handle, Int32(preset), Float(intensity))
+        ntsc_set_params(handle, Float(grain), Float(color), Float(tracking),
+                        Float(softness), Int32(tapeSpeed))
     }
 
     // MARK: Frame processing
@@ -259,6 +336,7 @@ final class CameraManager: NSObject, ObservableObject,
     }
 
     private func startRecording() {
+        lockInterfaceOrientation(true)
         isRecording = true
         recordingSeconds = 0
         timer?.invalidate()
@@ -271,6 +349,8 @@ final class CameraManager: NSObject, ObservableObject,
     func stopRecording() {
         guard isRecording else { return }
         isRecording = false
+        lockInterfaceOrientation(false)
+        updateOrientation()
         timer?.invalidate()
         timer = nil
         mediaQueue.async {
@@ -372,6 +452,21 @@ final class CameraManager: NSObject, ObservableObject,
     }
 
     // MARK: Helpers
+
+    /// While recording, freeze the UI orientation so it always matches the (fixed-size) video.
+    private func lockInterfaceOrientation(_ lock: Bool) {
+        if lock {
+            let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene
+            switch scene?.interfaceOrientation {
+            case .landscapeLeft:  AppDelegate.orientationMask = .landscapeLeft
+            case .landscapeRight: AppDelegate.orientationMask = .landscapeRight
+            default:              AppDelegate.orientationMask = .portrait
+            }
+        } else {
+            AppDelegate.orientationMask = [.portrait, .landscapeLeft, .landscapeRight]
+            UIViewController.attemptRotationToDeviceOrientation()
+        }
+    }
 
     private func toast(_ message: String) {
         DispatchQueue.main.async {
