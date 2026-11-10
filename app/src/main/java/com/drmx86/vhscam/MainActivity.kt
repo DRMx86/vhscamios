@@ -163,10 +163,10 @@ private fun Controls(vm: CameraViewModel, showTape: Boolean, toggleTape: () -> U
             }
         }
         if (showTape) {
-            TapeSlider("GRAIN", vm.grain, 0f..1f, vm::setGrain)
-            TapeSlider("COLOR", vm.color, 0f..1.5f, vm::setColor)
-            TapeSlider("DISTORTION", vm.tracking, 0f..1f, vm::setTracking)
-            TapeSlider("SOFTNESS", vm.softness, 0f..1f, vm::setSoftness)
+            TapeSlider("GRAIN", vm.grain, 0f..1f, vm::updateGrain)
+            TapeSlider("COLOR", vm.color, 0f..1.5f, vm::updateColor)
+            TapeSlider("DISTORTION", vm.tracking, 0f..1f, vm::updateTracking)
+            TapeSlider("SOFTNESS", vm.softness, 0f..1f, vm::updateSoftness)
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Row(Modifier.weight(1f)) {
