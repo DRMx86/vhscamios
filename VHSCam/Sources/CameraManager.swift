@@ -21,6 +21,8 @@ final class CameraManager: NSObject, ObservableObject,
         Look(name: "Classic",  grain: 0.45, color: 1.00, tracking: 0.45, softness: 0.45, tape: 1),
         Look(name: "Clean SP", grain: 0.15, color: 0.85, tracking: 0.15, softness: 0.25, tape: 0),
         Look(name: "Home Video", grain: 0.25, color: 1.15, tracking: 0.10, softness: 0.30, tape: 0),
+        Look(name: "RetroDann", grain: 0.80, color: 0.55, tracking: 0.24, softness: 0.35, tape: 0),
+        Look(name: "RetroDann2", grain: 0.27, color: 0.44, tracking: 0.15, softness: 0.55, tape: 0),
         Look(name: "Muted",    grain: 0.35, color: 0.45, tracking: 0.35, softness: 0.50, tape: 1),
         Look(name: "B&W",      grain: 0.50, color: 0.00, tracking: 0.35, softness: 0.40, tape: 1),
         Look(name: "Worn Tape", grain: 0.80, color: 0.80, tracking: 0.85, softness: 0.70, tape: 2)
