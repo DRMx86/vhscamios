@@ -9,7 +9,10 @@ A camera app that runs the [ntsc-rs](https://github.com/ntsc-rs/ntsc-rs) VHS eff
 - Live sliders: GRAIN, COLOR, DISTORTION, SOFTNESS, COMPOSITE noise, VIGNETTE, SNOW on/off + amount, lowpass filter (Butterworth / Constant-K)
 - 3 custom preset slots (tap to load, long-press to save)
 - Image stabilization toggle
-- Photo and video capture (processed output saved to Photos, with audio)
+- Photo and video capture (processed output saved to Photos and/or a folder you choose, with audio)
+- **Save location:** Photos, any Files folder (iCloud Drive, On My iPhone, USB drive), or both; falls back to Photos if the folder is unreachable
+- **Editor:** pick any photo/video from your library, preview it live with looks / presets / sliders, then Render to Photos or your folder
+- **Presets:** 3 named slots, shown beside STAB when loaded; export / import as `.drm` files
 
 ## How it works
 `NtscCore/` is a small static library (`ntsc_ios`) that wraps the `ntsc-rs` crate behind a C API.

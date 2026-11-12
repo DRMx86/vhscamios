@@ -1,4 +1,6 @@
 import SwiftUI
+import PhotosUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @StateObject private var cam = CameraManager()
@@ -6,6 +8,8 @@ struct ContentView: View {
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var showTape = false
     @State private var showSettings = false
+    @State private var pickedItem: PhotosPickerItem?
+    @State private var editor: EditorModel?
 
     private var isLandscape: Bool { verticalSizeClass == .compact }
     private var tape: TapeSettings { cam.settings.tape }
@@ -22,7 +26,7 @@ struct ContentView: View {
                             VStack(spacing: 4) { topBar; quickChips }
                         }
                     controlsPanel
-                        .frame(width: 330)
+                        .frame(width: 340)
                 }
             } else {
                 VStack(spacing: 0) {
@@ -33,7 +37,7 @@ struct ContentView: View {
                 }
             }
 
-            if let message = cam.statusMessage {
+            if let message = cam.statusMessage, editor == nil {
                 Text(message)
                     .font(.system(.subheadline, design: .monospaced))
                     .padding(.horizontal, 14).padding(.vertical, 8)
@@ -45,10 +49,14 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.2), value: cam.statusMessage)
         .onAppear { cam.start() }
         .onChange(of: scenePhase) { phase in
-            if phase == .active { cam.start() } else { cam.stop() }
+            if phase == .active { if editor == nil { cam.start() } } else { cam.stop() }
         }
+        .onChange(of: pickedItem) { item in loadPicked(item) }
         .sheet(isPresented: $showSettings) {
             SettingsView(cam: cam).presentationDetents([.medium, .large])
+        }
+        .fullScreenCover(item: $editor, onDismiss: { cam.start() }) { model in
+            EditorView(model: model, cam: cam)
         }
         .alert("Camera access needed", isPresented: $cam.cameraDenied) {
             Button("Open Settings") {
@@ -67,10 +75,37 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    // MARK: Import from the photo library -> editor
+
+    private func loadPicked(_ item: PhotosPickerItem?) {
+        guard let item else { return }
+        Task { @MainActor in
+            defer { pickedItem = nil }
+            cam.toast("Loading…")
+            if item.supportedContentTypes.contains(where: { $0.conforms(to: .movie) }) {
+                if let movie = try? await item.loadTransferable(type: PickedMovie.self) {
+                    open(EditorModel(video: movie.url, settings: cam.settings))
+                    return
+                }
+            } else if let data = try? await item.loadTransferable(type: Data.self),
+                      let image = UIImage(data: data),
+                      let model = EditorModel(photo: image, settings: cam.settings) {
+                open(model)
+                return
+            }
+            cam.toast("Couldn't load that item")
+        }
+    }
+
+    private func open(_ model: EditorModel) {
+        cam.stop()
+        editor = model
+    }
+
     // MARK: Top bar (VCR-style on-screen display)
 
     private var topBar: some View {
-        HStack {
+        HStack(spacing: 6) {
             HStack(spacing: 6) {
                 Circle()
                     .fill(cam.isRecording ? Color.red : Color.gray.opacity(0.5))
@@ -82,6 +117,11 @@ struct ContentView: View {
             Text("\(format.resolution.rawValue) · \(format.aspect.rawValue)")
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
+            PhotosPicker(selection: $pickedItem, matching: .any(of: [.images, .videos])) {
+                Image(systemName: "photo.on.rectangle").font(.title3).frame(width: 36, height: 32)
+            }
+            .foregroundStyle(.white)
+            .disabled(cam.isRecording)
             Button { showSettings = true } label: {
                 Image(systemName: "gearshape.fill").font(.title3).frame(width: 36, height: 32)
             }
@@ -91,24 +131,46 @@ struct ContentView: View {
         .padding(.vertical, 6)
     }
 
-    /// One-tap toggles that matter most while shooting.
+    /// One-tap toggles that matter most while shooting, plus the loaded preset.
     private var quickChips: some View {
-        HStack(spacing: 8) {
-            chip("VHS", on: tape.vhsOn) { cam.settings.tape.vhsOn.toggle() }
-            chip(format.aspect == .square ? "1:1" : "FULL", on: format.aspect == .square) {
-                cam.settings.format.aspect = format.aspect.next
-            }
-            .disabled(cam.isRecording)
-            chip(format.fps.shortLabel, on: format.fps != .vhs) {
-                cam.settings.format.fps = format.fps.next
-            }
-            .disabled(cam.isRecording)
-            chip("STAB", on: format.stabilization) { cam.settings.format.stabilization.toggle() }
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                chip("VHS", on: tape.vhsOn) { cam.settings.tape.vhsOn.toggle() }
+                chip(format.aspect == .square ? "1:1" : "FULL", on: format.aspect == .square) {
+                    cam.settings.format.aspect = format.aspect.next
+                }
                 .disabled(cam.isRecording)
-            Spacer(minLength: 0)
+                chip(format.fps.shortLabel, on: format.fps != .vhs) {
+                    cam.settings.format.fps = format.fps.next
+                }
+                .disabled(cam.isRecording)
+                chip("STAB", on: format.stabilization) { cam.settings.format.stabilization.toggle() }
+                    .disabled(cam.isRecording)
+                presetChip
+            }
+            .padding(.horizontal, 16)
         }
-        .padding(.horizontal, 16)
         .padding(.bottom, 6)
+    }
+
+    /// Shows the loaded preset beside STAB ("*" = changed since loading); otherwise the current look.
+    private var presetChip: some View {
+        var text: String
+        var isPreset = false
+        if let i = cam.activeSlot, let p = cam.slots[i] {
+            text = "P\(i + 1) \(p.displayName)" + (p.settings == cam.settings ? "" : "*")
+            isPreset = true
+        } else if let l = tape.lookIndex, Look.all.indices.contains(l) {
+            text = Look.all[l].name
+        } else {
+            text = "Custom"
+        }
+        return Text(text)
+            .font(.system(size: 12, weight: .bold, design: .monospaced))
+            .lineLimit(1)
+            .padding(.horizontal, 11).padding(.vertical, 6)
+            .background(isPreset ? Color.yellow : Color.white.opacity(0.15), in: Capsule())
+            .foregroundStyle(isPreset ? Color.black : Color.white.opacity(0.8))
     }
 
     private func chip(_ title: String, on: Bool, action: @escaping () -> Void) -> some View {
@@ -123,17 +185,28 @@ struct ContentView: View {
 
     // MARK: Controls
 
+    private var picker: some View {
+        PresetPicker(
+            currentLook: tape.lookIndex, presets: cam.slots, activeSlot: cam.activeSlot, grid: isLandscape,
+            onLook: { cam.select(look: $0) },
+            onLoad: { cam.loadSlot($0) },
+            onSave: { cam.saveSlot($0) })
+    }
+
     private var controlsPanel: some View {
         VStack(spacing: 10) {
             if isLandscape {
                 ScrollView(showsIndicators: false) {
-                    VStack(spacing: 10) { lookStrip; if showTape { tapeControls } }
+                    VStack(spacing: 12) {
+                        picker
+                        if showTape { TapeControlsView(tape: $cam.settings.tape) }
+                    }
                 }
             } else {
-                lookStrip
+                picker
                 if showTape {
-                    ScrollView(showsIndicators: false) { tapeControls }
-                        .frame(maxHeight: 210)
+                    ScrollView(showsIndicators: false) { TapeControlsView(tape: $cam.settings.tape) }
+                        .frame(maxHeight: 200)
                 }
             }
             actionRow
@@ -141,90 +214,6 @@ struct ContentView: View {
         .padding(.horizontal, 16)
         .padding(.top, 8)
         .padding(.bottom, 10)
-    }
-
-    private var lookStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(Look.all.indices, id: \.self) { index in
-                    let selected = tape.lookIndex == index
-                    Button {
-                        cam.select(look: index)
-                    } label: {
-                        Text(Look.all[index].name)
-                            .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                            .padding(.horizontal, 12).padding(.vertical, 7)
-                            .background(selected ? Color.white : Color.white.opacity(0.15), in: Capsule())
-                            .foregroundStyle(selected ? Color.black : Color.white)
-                    }
-                }
-                Divider().frame(height: 20)
-                // Tap = load, long-press = save current settings.
-                ForEach(0..<3, id: \.self) { i in
-                    let filled = cam.slots[i] != nil
-                    Text("P\(i + 1)")
-                        .font(.system(size: 13, weight: .bold, design: .monospaced))
-                        .padding(.horizontal, 12).padding(.vertical, 7)
-                        .background(filled ? Color.yellow : Color.white.opacity(0.15), in: Capsule())
-                        .foregroundStyle(filled ? Color.black : Color.white.opacity(0.6))
-                        .onTapGesture { cam.loadSlot(i) }
-                        .onLongPressGesture(minimumDuration: 0.6) { cam.saveSlot(i) }
-                        .accessibilityAddTraits(.isButton)
-                }
-            }
-        }
-    }
-
-    private var tapeControls: some View {
-        let vhs = tape.vhsOn
-        return VStack(spacing: 6) {
-            tapeSlider("GRAIN", $cam.settings.tape.grain, vhsOnly: true)
-            tapeSlider("COLOR", $cam.settings.tape.color, range: 0...1.5)
-            tapeSlider("DISTORTION", $cam.settings.tape.tracking, vhsOnly: true)
-            tapeSlider("SOFTNESS", $cam.settings.tape.softness, vhsOnly: true)
-            tapeSlider("COMPOSITE", $cam.settings.tape.compositeNoise, range: 0...0.2, vhsOnly: true)
-            tapeSlider("VIGNETTE", $cam.settings.tape.vignette)
-
-            HStack(spacing: 8) {
-                Text("SNOW")
-                    .font(.system(size: 11, weight: .bold, design: .monospaced))
-                    .frame(width: 82, alignment: .leading)
-                Toggle("Snow", isOn: $cam.settings.tape.snowOn).labelsHidden()
-                Slider(value: $cam.settings.tape.snow, in: 0...0.02)
-                    .disabled(!tape.snowOn)
-            }
-            .disabled(!vhs).opacity(vhs ? 1 : 0.4)
-
-            VStack(spacing: 2) {
-                HStack(spacing: 8) {
-                    Text("LOWPASS")
-                        .font(.system(size: 11, weight: .bold, design: .monospaced))
-                        .frame(width: 82, alignment: .leading)
-                    Picker("Lowpass filter", selection: $cam.settings.tape.filter) {
-                        ForEach(LowpassFilter.allCases) { Text($0.label).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                }
-                Text(tape.filter.hint)
-                    .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
-            }
-            .disabled(!vhs).opacity(vhs ? 1 : 0.4)
-        }
-    }
-
-    private func tapeSlider(_ label: String, _ value: Binding<Double>,
-                            range: ClosedRange<Double> = 0...1, vhsOnly: Bool = false) -> some View {
-        let dim = vhsOnly && !tape.vhsOn
-        return HStack(spacing: 8) {
-            Text(label)
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                .frame(width: 82, alignment: .leading)
-            Slider(value: value, in: range)
-            Text("\(Int(((value.wrappedValue - range.lowerBound) / (range.upperBound - range.lowerBound)) * 100))")
-                .font(.system(size: 11, design: .monospaced))
-                .frame(width: 32, alignment: .trailing)
-        }
-        .disabled(dim).opacity(dim ? 0.4 : 1)
     }
 
     private var actionRow: some View {
@@ -293,11 +282,26 @@ struct ContentView: View {
 
 struct SettingsView: View {
     @ObservedObject var cam: CameraManager
+    @ObservedObject private var exporter = Exporter.shared
     @Environment(\.dismiss) private var dismiss
+
+    private enum ImportTarget { case folder, preset(Int) }
+    @State private var showImporter = false
+    @State private var importTarget: ImportTarget = .folder
+    @State private var shareItem: ShareItem?
+
+    private var importTypes: [UTType] {
+        if case .folder = importTarget { return [.folder] }
+        return [.data]   // .drm is a custom extension, so allow any file and validate the contents
+    }
 
     var body: some View {
         NavigationStack {
             Form {
+                if let m = cam.statusMessage {
+                    Section { Text(m).font(.footnote) }
+                }
+
                 Section {
                     Picker("Shape", selection: $cam.settings.format.aspect) {
                         ForEach(AspectMode.allCases) { Text($0.rawValue).tag($0) }
@@ -318,30 +322,38 @@ struct SettingsView: View {
                 } header: {
                     Text("Format")
                 } footer: {
-                    Text("VHS frame rate = 30 fps. 480p is the most authentic and the smoothest; 1080p may drop frames. Stabilization only works where the camera format supports it. Locked while recording.")
+                    Text("VHS frame rate = 30 fps. 480p is the most authentic and the smoothest; 1080p may drop frames. Locked while recording.")
                 }
                 .disabled(cam.isRecording)
 
                 Section {
-                    ForEach(0..<3, id: \.self) { i in
+                    Toggle("Save to Photos", isOn: $exporter.saveToPhotos)
+                    Toggle("Save to folder", isOn: $exporter.saveToFolder).disabled(!exporter.hasFolder)
+                    Button {
+                        importTarget = .folder
+                        showImporter = true
+                    } label: {
                         HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Preset \(i + 1)").font(.headline)
-                                Text(cam.slots[i]?.summary ?? "Empty")
-                                    .font(.footnote).foregroundStyle(.secondary)
-                            }
+                            Text(exporter.hasFolder ? "Folder: \(exporter.folderName ?? "")" : "Choose folder…")
                             Spacer()
-                            Button("Save") { cam.saveSlot(i) }.buttonStyle(.bordered)
-                            Button("Load") { cam.loadSlot(i) }
-                                .buttonStyle(.borderedProminent)
-                                .disabled(cam.slots[i] == nil)
+                            Image(systemName: "folder")
                         }
-                        .swipeActions { Button("Clear", role: .destructive) { cam.clearSlot(i) } }
                     }
+                    if exporter.hasFolder {
+                        Button("Stop using this folder", role: .destructive) { exporter.clearFolder() }
+                    }
+                } header: {
+                    Text("Save location")
+                } footer: {
+                    Text("Pick any folder in Files: iCloud Drive, On My iPhone, or a USB drive plugged into the phone. Recordings are copied there after you stop. If the folder can't be reached (drive unplugged), the file goes to Photos instead so nothing is lost.")
+                }
+
+                Section {
+                    ForEach(0..<3, id: \.self) { presetRow($0) }
                 } header: {
                     Text("My presets")
                 } footer: {
-                    Text("A preset stores the look, tape controls and format. Long-press P1–P3 on the camera screen to save. Swipe a row to clear it. Loading during a recording keeps the current format.")
+                    Text("A preset stores the look, tape controls and format. Rename it here, or use the ⋯ menu to save it as a .drm file (to Files / a USB drive / AirDrop) or import one. Long-press P1–P3 on the camera screen to save.")
                 }
 
                 Section {
@@ -351,6 +363,72 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .fileImporter(isPresented: $showImporter, allowedContentTypes: importTypes) { handleImport($0) }
+            .sheet(item: $shareItem) { ShareSheet(url: $0.url) }
+        }
+    }
+
+    private func presetRow(_ i: Int) -> some View {
+        let preset = cam.slots[i]
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("P\(i + 1)").font(.system(.headline, design: .monospaced)).frame(width: 34, alignment: .leading)
+                if preset != nil {
+                    TextField("Name", text: Binding(
+                        get: { cam.slots[i]?.name ?? "" },
+                        set: { cam.renameSlot(i, $0) }))
+                } else {
+                    Text("Empty").foregroundStyle(.secondary)
+                    Spacer()
+                }
+                Menu {
+                    if let p = preset {
+                        Button { if let url = cam.presetFile(i) { shareItem = ShareItem(url: url) } } label: {
+                            Label("Save / share .drm file…", systemImage: "square.and.arrow.up")
+                        }
+                        if exporter.hasFolder {
+                            Button {
+                                if let url = cam.presetFile(i) {
+                                    let ok = exporter.copyToFolder(url, name: p.fileName)
+                                    cam.toast(ok ? "Saved \(p.fileName) to \(exporter.folderName ?? "folder")" : "Folder unavailable")
+                                }
+                            } label: { Label("Save .drm to \(exporter.folderName ?? "folder")", systemImage: "folder") }
+                        }
+                    }
+                    Button {
+                        importTarget = .preset(i)
+                        showImporter = true
+                    } label: { Label("Import .drm file…", systemImage: "square.and.arrow.down") }
+                    if preset != nil {
+                        Button(role: .destructive) { cam.clearSlot(i) } label: { Label("Clear", systemImage: "trash") }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle").font(.title3)
+                }
+            }
+            if let p = preset {
+                Text(p.settings.summary).font(.footnote).foregroundStyle(.secondary)
+            }
+            HStack {
+                Button("Save current") { cam.saveSlot(i) }.buttonStyle(.bordered)
+                Button("Load") { cam.loadSlot(i) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(preset == nil)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func handleImport(_ result: Result<URL, Error>) {
+        guard case .success(let url) = result else { return }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        switch importTarget {
+        case .folder:
+            if !exporter.setFolder(url) { cam.toast("Couldn't use that folder") }
+        case .preset(let i):
+            if let data = try? Data(contentsOf: url), cam.importPreset(data, into: i) { return }
+            cam.toast("That isn't a valid .drm preset")
         }
     }
 }

@@ -14,7 +14,7 @@ typedef struct {
     float color;           // 0...2 (0 = black & white, 1 = natural)
     float tracking;        // 0...1 (distortion)
     float softness;        // 0...1
-    float composite_noise; // composite signal noise intensity
+    float composite_noise; // amount 0...1 (squared into ntsc-rs composite noise intensity)
     float snow;            // snow intensity (used when snow_on)
     float vignette;        // 0...1
     float tint_r, tint_g, tint_b;

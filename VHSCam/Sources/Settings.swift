@@ -76,7 +76,7 @@ struct Look {
     var tracking = 0.45
     var softness = 0.45
     var tape = 1            // 0 = SP, 1 = LP, 2 = EP
-    var composite = 0.05
+    var composite = 0.22
     var vignette = 0.0
     var tintR = 1.0, tintG = 1.0, tintB = 1.0
     var contrast = 1.0
@@ -84,13 +84,13 @@ struct Look {
 
     static let all: [Look] = [
         Look(name: "Classic",    grain: 0.45, color: 1.00, tracking: 0.45, softness: 0.45, tape: 1),
-        Look(name: "Clean SP",   grain: 0.15, color: 0.85, tracking: 0.15, softness: 0.25, tape: 0, composite: 0.03),
+        Look(name: "Clean SP",   grain: 0.15, color: 0.85, tracking: 0.15, softness: 0.25, tape: 0, composite: 0.17),
         Look(name: "Home Video", grain: 0.25, color: 1.15, tracking: 0.10, softness: 0.30, tape: 0),
-        Look(name: "RetroDann",  grain: 0.80, color: 0.55, tracking: 0.24, softness: 0.35, tape: 0, composite: 0.08),
+        Look(name: "RetroDann",  grain: 0.80, color: 0.55, tracking: 0.24, softness: 0.35, tape: 0, composite: 0.28),
         Look(name: "RetroDann2", grain: 0.27, color: 0.44, tracking: 0.15, softness: 0.55, tape: 0),
         Look(name: "Muted",      grain: 0.35, color: 0.45, tracking: 0.35, softness: 0.50, tape: 1),
         Look(name: "B&W",        grain: 0.50, color: 0.00, tracking: 0.35, softness: 0.40, tape: 1),
-        Look(name: "Worn Tape",  grain: 0.80, color: 0.80, tracking: 0.85, softness: 0.70, tape: 2, composite: 0.10),
+        Look(name: "Worn Tape",  grain: 0.80, color: 0.80, tracking: 0.85, softness: 0.70, tape: 2, composite: 0.32),
         // Film looks: VHS effect off by default (turn the VHS chip on to stack them).
         Look(name: "FunSaver", vhsOn: false, color: 1.28, vignette: 0.55,
              tintR: 1.07, tintG: 1.00, tintB: 0.88, contrast: 1.15, filmGrain: 0.35),
@@ -118,7 +118,7 @@ struct TapeSettings: Codable, Equatable {
     var tracking = 0.45
     var softness = 0.45
     var tapeSpeed = 1
-    var compositeNoise = 0.05
+    var compositeNoise = 0.22
     var filter: LowpassFilter = .butterworth
     var snowOn = true
     var snow = 0.002
@@ -151,5 +151,33 @@ struct Settings: Codable, Equatable {
         let name: String
         if let i = tape.lookIndex, Look.all.indices.contains(i) { name = Look.all[i].name } else { name = "Custom" }
         return "\(name) · \(format.aspect.rawValue) · \(format.resolution.rawValue)\(tape.vhsOn ? " · VHS" : "")"
+    }
+}
+
+/// A named, saveable preset. Stored in the 3 slots and exported as a ".drm" file (JSON).
+struct Preset: Codable, Equatable {
+    var version = 1
+    var name: String
+    var settings: Settings
+
+    var displayName: String { name.trimmingCharacters(in: .whitespaces).isEmpty ? "Preset" : name }
+
+    func fileData() -> Data? {
+        let e = JSONEncoder()
+        e.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try? e.encode(self)
+    }
+
+    /// Accepts a .drm file, or a bare Settings JSON.
+    static func decode(_ data: Data) -> Preset? {
+        let d = JSONDecoder()
+        if let p = try? d.decode(Preset.self, from: data) { return p }
+        if let s = try? d.decode(Settings.self, from: data) { return Preset(name: "Imported", settings: s) }
+        return nil
+    }
+
+    var fileName: String {
+        let cleaned = displayName.map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" ? $0 : "_" }
+        return String(cleaned).trimmingCharacters(in: CharacterSet(charactersIn: "_")) + ".drm"
     }
 }

@@ -27,7 +27,7 @@ pub struct NtscParams {
     pub color: f32, // 0 = B&W, 1 = natural, up to 2
     pub tracking: f32,
     pub softness: f32,
-    pub composite_noise: f32,
+    pub composite_noise: f32, // amount 0..1 (squared into ntsc-rs intensity)
     pub snow: f32,
     pub vignette: f32,
     pub tint_r: f32,
@@ -48,7 +48,7 @@ impl Default for NtscParams {
             color: 1.0,
             tracking: 0.45,
             softness: 0.45,
-            composite_noise: 0.05,
+            composite_noise: 0.22,
             snow: 0.002,
             vignette: 0.0,
             tint_r: 1.0,
@@ -95,10 +95,12 @@ fn build_effect(p: &NtscParams) -> NtscEffect {
     };
     e.vhs_settings.settings.sharpen.enabled = true;
 
-    // Composite signal noise (its own slider)
+    // Composite signal noise (its own slider). ntsc-rs accepts intensity 0..1 (default 0.05),
+    // so the slider is an "amount" 0..1 squared: fine control at the low end, full range on top.
     let comp = p.composite_noise.clamp(0.0, 1.0);
-    e.composite_noise.enabled = comp > 0.001;
-    e.composite_noise.settings.intensity = comp;
+    let comp_intensity = comp * comp;
+    e.composite_noise.enabled = comp_intensity > 0.0005;
+    e.composite_noise.settings.intensity = comp_intensity;
 
     // Grain (luma / chroma noise)
     let grainy = g > 0.01;

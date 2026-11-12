@@ -13,13 +13,15 @@ final class CameraManager: NSObject, ObservableObject,
     enum CaptureMode { case photo, video }
 
     // MARK: Published UI state (main thread)
-    @Published var settings: Settings = CameraManager.load(Settings.self, key: "vhscam.settings") ?? Settings() {
+    @Published var settings: Settings = CameraManager.load(Settings.self, key: "vhscam.settings.v2") ?? Settings() {
         didSet { settingsDidChange(from: oldValue) }
     }
-    /// Three user preset slots (full settings: format + tape).
-    @Published var slots: [Settings?] = CameraManager.load([Settings?].self, key: "vhscam.slots") ?? [nil, nil, nil] {
-        didSet { Self.save(slots, key: "vhscam.slots") }
+    /// Three named preset slots (full settings: format + tape). Exportable as ".drm" files.
+    @Published var slots: [Preset?] = CameraManager.load([Preset?].self, key: "vhscam.presets.v1") ?? [nil, nil, nil] {
+        didSet { Self.save(slots, key: "vhscam.presets.v1") }
     }
+    /// The preset slot that was last loaded or saved (nil after picking a look).
+    @Published var activeSlot: Int?
     @Published var captureMode: CaptureMode = .video
     @Published var isRecording = false
     @Published var recordingSeconds = 0
@@ -51,7 +53,7 @@ final class CameraManager: NSObject, ObservableObject,
     private var timer: Timer?
 
     // MARK: ntsc-rs
-    private var handle: OpaquePointer?
+    private let processor = VHSProcessor()
     private var frameCounter: UInt64 = 0
 
     // MARK: mediaQueue-only state
@@ -69,7 +71,6 @@ final class CameraManager: NSObject, ObservableObject,
 
     override init() {
         super.init()
-        handle = ntsc_create()
         displayLayer.videoGravity = .resizeAspect
         displayLayer.backgroundColor = UIColor.black.cgColor
         pushParams()
@@ -86,7 +87,6 @@ final class CameraManager: NSObject, ObservableObject,
     deinit {
         NotificationCenter.default.removeObserver(self)
         UIDevice.current.endGeneratingDeviceOrientationNotifications()
-        if let handle { ntsc_destroy(handle) }
     }
 
     // MARK: Persistence
@@ -151,7 +151,7 @@ final class CameraManager: NSObject, ObservableObject,
         }
 
         let new = settings
-        Self.save(new, key: "vhscam.settings")
+        Self.save(new, key: "vhscam.settings.v2")
         pushParams()
 
         let f = new.format
@@ -178,24 +178,7 @@ final class CameraManager: NSObject, ObservableObject,
     }
 
     private func pushParams() {
-        guard let handle else { return }
-        let t = settings.tape
-        var p = NtscParams(
-            vhs_on: t.vhsOn ? 1 : 0,
-            tape_speed: Int32(t.tapeSpeed),
-            filter_type: Int32(t.filter.rawValue),
-            snow_on: t.snowOn ? 1 : 0,
-            grain: Float(t.grain),
-            color: Float(t.color),
-            tracking: Float(t.tracking),
-            softness: Float(t.softness),
-            composite_noise: Float(t.compositeNoise),
-            snow: Float(t.snow),
-            vignette: Float(t.vignette),
-            tint_r: Float(t.tintR), tint_g: Float(t.tintG), tint_b: Float(t.tintB),
-            contrast: Float(t.contrast),
-            film_grain: Float(t.filmGrain))
-        ntsc_set_params(handle, &p)
+        processor.update(settings.tape)
     }
 
     // MARK: Looks and presets
@@ -207,29 +190,59 @@ final class CameraManager: NSObject, ObservableObject,
         s.tape.apply(Look.all[index], index: index)
         settings = s
         applyingLook = false
+        activeSlot = nil
     }
 
-    func saveSlot(_ i: Int) {
+    func defaultName(_ i: Int) -> String { "Preset \(i + 1)" }
+
+    /// Stores `s` in slot `i`, keeping the slot's name if it already has one.
+    func storePreset(_ s: Settings, slot i: Int) {
         guard slots.indices.contains(i) else { return }
-        slots[i] = settings
+        slots[i] = Preset(name: slots[i]?.name ?? defaultName(i), settings: s)
+        activeSlot = i
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         toast("Saved to P\(i + 1)")
     }
 
+    func saveSlot(_ i: Int) { storePreset(settings, slot: i) }
+
     func loadSlot(_ i: Int) {
         guard slots.indices.contains(i) else { return }
-        guard var s = slots[i] else { toast("P\(i + 1) is empty · long-press to save"); return }
+        guard var s = slots[i]?.settings else { toast("P\(i + 1) is empty · long-press to save"); return }
         if isRecording { s.format = settings.format }   // keep the frame size while recording
         applyingLook = true
         settings = s
         applyingLook = false
+        activeSlot = i
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        toast("Loaded P\(i + 1)")
+        toast("Loaded P\(i + 1) · \(slots[i]?.displayName ?? "")")
+    }
+
+    func renameSlot(_ i: Int, _ name: String) {
+        guard slots.indices.contains(i), slots[i] != nil else { return }
+        slots[i]?.name = String(name.prefix(24))
     }
 
     func clearSlot(_ i: Int) {
         guard slots.indices.contains(i) else { return }
         slots[i] = nil
+        if activeSlot == i { activeSlot = nil }
+    }
+
+    /// Writes the preset to a temporary ".drm" file for sharing / saving to Files.
+    func presetFile(_ i: Int) -> URL? {
+        guard slots.indices.contains(i), let p = slots[i], let data = p.fileData() else { return nil }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(p.fileName)
+        try? FileManager.default.removeItem(at: url)
+        return (try? data.write(to: url)) != nil ? url : nil
+    }
+
+    /// Imports a ".drm" file into slot `i`.
+    func importPreset(_ data: Data, into i: Int) -> Bool {
+        guard slots.indices.contains(i), let p = Preset.decode(data) else { return false }
+        slots[i] = p
+        toast("Imported \(p.displayName) to P\(i + 1)")
+        return true
     }
 
     func resetSettings() {
@@ -238,6 +251,7 @@ final class CameraManager: NSObject, ObservableObject,
         if isRecording { s.format = settings.format }
         settings = s
         applyingLook = false
+        activeSlot = nil
     }
 
     // MARK: Session configuration (sessionQueue)
@@ -436,7 +450,7 @@ final class CameraManager: NSObject, ObservableObject,
             appendAudio(sampleBuffer)
             return
         }
-        guard let handle, let source = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        guard let source = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
         var pixelBuffer = source
         var displayBuffer = sampleBuffer
@@ -451,18 +465,7 @@ final class CameraManager: NSObject, ObservableObject,
             }
         }
 
-        CVPixelBufferLockBaseAddress(pixelBuffer, [])
-        if let base = CVPixelBufferGetBaseAddress(pixelBuffer) {
-            _ = ntsc_process_bgra(
-                handle,
-                base.assumingMemoryBound(to: UInt8.self),
-                UInt32(CVPixelBufferGetWidth(pixelBuffer)),
-                UInt32(CVPixelBufferGetHeight(pixelBuffer)),
-                UInt32(CVPixelBufferGetBytesPerRow(pixelBuffer)),
-                frameCounter
-            )
-        }
-        CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
+        processor.process(pixelBuffer, frame: frameCounter)
         frameCounter &+= 1
 
         show(displayBuffer)
@@ -548,11 +551,10 @@ final class CameraManager: NSObject, ObservableObject,
         let image = CIImage(cvPixelBuffer: pixelBuffer)
         guard let cg = ciContext.createCGImage(image, from: image.extent),
               let data = UIImage(cgImage: cg).jpegData(compressionQuality: 0.95) else { return }
-        PHPhotoLibrary.shared().performChanges({
-            PHAssetCreationRequest.forAsset().addResource(with: .photo, data: data, options: nil)
-        }) { [weak self] ok, _ in
-            self?.toast(ok ? "Photo saved" : "Couldn't save photo (check Photos access)")
-        }
+        let name = Exporter.fileName("jpg")
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).jpg")
+        guard (try? data.write(to: tmp)) != nil else { toast("Couldn't save photo"); return }
+        Exporter.shared.save(file: tmp, name: name, isVideo: false) { [weak self] in self?.toast($0) }
     }
 
     // MARK: Video recording
@@ -668,18 +670,13 @@ final class CameraManager: NSObject, ObservableObject,
                 self?.toast("Recording failed")
                 return
             }
-            PHPhotoLibrary.shared().performChanges({
-                PHAssetCreationRequest.creationRequestForAssetFromVideo(atFileURL: url)
-            }) { ok, _ in
-                try? FileManager.default.removeItem(at: url)
-                self?.toast(ok ? "Video saved" : "Couldn't save video (check Photos access)")
-            }
+            Exporter.shared.save(file: url, name: Exporter.fileName("mov"), isVideo: true) { self?.toast($0) }
         }
     }
 
     // MARK: Helpers
 
-    private func toast(_ message: String) {
+    func toast(_ message: String) {
         DispatchQueue.main.async {
             self.statusMessage = message
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
