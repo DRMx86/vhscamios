@@ -3,41 +3,24 @@ import Photos
 import UIKit
 import CoreImage
 
-/// Captures camera frames, runs each through the ntsc-rs VHS effect (Rust, via C FFI),
-/// shows the result live, and can save the processed output as a photo or video.
+/// Captures camera frames, optionally center-crops them to a square, runs each through the
+/// ntsc-rs VHS effect + film grade (Rust, via C FFI), shows the result live, and can save the
+/// processed output as a photo or video.
 final class CameraManager: NSObject, ObservableObject,
                            AVCaptureVideoDataOutputSampleBufferDelegate,
                            AVCaptureAudioDataOutputSampleBufferDelegate {
 
     enum CaptureMode { case photo, video }
 
-    struct Look {
-        let name: String
-        let grain, color, tracking, softness: Double
-        let tape: Int   // 0 = SP, 1 = LP, 2 = EP
-    }
-
-    static let looks: [Look] = [
-        Look(name: "Classic",  grain: 0.45, color: 1.00, tracking: 0.45, softness: 0.45, tape: 1),
-        Look(name: "Clean SP", grain: 0.15, color: 0.85, tracking: 0.15, softness: 0.25, tape: 0),
-        Look(name: "Home Video", grain: 0.25, color: 1.15, tracking: 0.10, softness: 0.30, tape: 0),
-        Look(name: "RetroDann", grain: 0.80, color: 0.55, tracking: 0.24, softness: 0.35, tape: 0),
-        Look(name: "RetroDann2", grain: 0.27, color: 0.44, tracking: 0.15, softness: 0.55, tape: 0),
-        Look(name: "Muted",    grain: 0.35, color: 0.45, tracking: 0.35, softness: 0.50, tape: 1),
-        Look(name: "B&W",      grain: 0.50, color: 0.00, tracking: 0.35, softness: 0.40, tape: 1),
-        Look(name: "Worn Tape", grain: 0.80, color: 0.80, tracking: 0.85, softness: 0.70, tape: 2)
-    ]
-
     // MARK: Published UI state (main thread)
-    @Published var position: AVCaptureDevice.Position = .back   // back camera is the default
+    @Published var settings: Settings = CameraManager.load(Settings.self, key: "vhscam.settings") ?? Settings() {
+        didSet { settingsDidChange(from: oldValue) }
+    }
+    /// Three user preset slots (full settings: format + tape).
+    @Published var slots: [Settings?] = CameraManager.load([Settings?].self, key: "vhscam.slots") ?? [nil, nil, nil] {
+        didSet { Self.save(slots, key: "vhscam.slots") }
+    }
     @Published var captureMode: CaptureMode = .video
-    // Live "tape controls". Moving any of them switches the look to "custom".
-    @Published var grain: Double = 0.45 { didSet { controlChanged() } }
-    @Published var color: Double = 1.0 { didSet { controlChanged() } }       // 0 = B&W, 1 = natural, 1.5 = vivid
-    @Published var tracking: Double = 0.45 { didSet { controlChanged() } }   // distortion
-    @Published var softness: Double = 0.45 { didSet { controlChanged() } }
-    @Published var selectedLook: Int? = 0
-    @Published var useHD = false
     @Published var isRecording = false
     @Published var recordingSeconds = 0
     @Published var statusMessage: String?
@@ -58,17 +41,21 @@ final class CameraManager: NSObject, ObservableObject,
     private var outputsAdded = false
     private var micAvailable = false
 
+    // sessionQueue only
+    private var captureOrientation: AVCaptureVideoOrientation = .portrait
+    private var wantsStabilization = false
+
+    // main thread only
+    private var applyingLook = false
+    private var lastDeviceOrientation: UIDeviceOrientation = .portrait
+    private var timer: Timer?
+
     // MARK: ntsc-rs
     private var handle: OpaquePointer?
     private var frameCounter: UInt64 = 0
-    private var tapeSpeed = 1
-    private var applyingLook = false
 
-    // MARK: Orientation (buffers follow how the phone is held, so VHS scanlines and the
-    // head-switching band are always horizontal / at the bottom of the picture)
-    private var captureOrientation: AVCaptureVideoOrientation = .portrait   // sessionQueue only
-
-    // MARK: Recording / photo state (touched only on mediaQueue)
+    // MARK: mediaQueue-only state
+    private var mediaFormat = FormatSettings()
     private var wantsRecording = false
     private var wantsPhoto = false
     private var writer: AVAssetWriter?
@@ -77,16 +64,20 @@ final class CameraManager: NSObject, ObservableObject,
     private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
     private var recordingURL: URL?
     private let ciContext = CIContext()
-    private var timer: Timer?
+    private var cropPool: CVPixelBufferPool?
+    private var cropSide = 0
 
     override init() {
         super.init()
         handle = ntsc_create()
         displayLayer.videoGravity = .resizeAspect
         displayLayer.backgroundColor = UIColor.black.cgColor
-        select(look: 0)
+        pushParams()
+        let f = settings.format
+        mediaQueue.async { self.mediaFormat = f }
 
         UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+        noteDeviceOrientation()
         NotificationCenter.default.addObserver(
             self, selector: #selector(deviceOrientationChanged),
             name: UIDevice.orientationDidChangeNotification, object: nil)
@@ -98,21 +89,32 @@ final class CameraManager: NSObject, ObservableObject,
         if let handle { ntsc_destroy(handle) }
     }
 
+    // MARK: Persistence
+    private static func load<T: Decodable>(_ type: T.Type, key: String) -> T? {
+        guard let d = UserDefaults.standard.data(forKey: key) else { return nil }
+        return try? JSONDecoder().decode(type, from: d)
+    }
+    private static func save<T: Encodable>(_ value: T, key: String) {
+        if let d = try? JSONEncoder().encode(value) { UserDefaults.standard.set(d, forKey: key) }
+    }
+
     // MARK: Lifecycle
 
     func start() {
+        noteDeviceOrientation()
         updateOrientation()
+        refreshInterfaceMask()
         requestPermissions { [weak self] videoGranted in
             guard let self else { return }
-            guard videoGranted else {
-                DispatchQueue.main.async { self.cameraDenied = true }
-                return
-            }
-            let pos = self.position
-            let hd = self.useHD
-            self.sessionQueue.async {
-                self.configureSession(position: pos, hd: hd)
-                if !self.session.isRunning { self.session.startRunning() }
+            DispatchQueue.main.async {
+                guard videoGranted else { self.cameraDenied = true; return }
+                let f = self.settings.format
+                self.mediaQueue.async { self.mediaFormat = f }
+                self.sessionQueue.async {
+                    self.wantsStabilization = f.stabilization
+                    self.configureSession(format: f)
+                    if !self.session.isRunning { self.session.startRunning() }
+                }
             }
         }
     }
@@ -134,14 +136,118 @@ final class CameraManager: NSObject, ObservableObject,
         }
     }
 
-    // MARK: Session configuration
+    // MARK: Settings changes
 
-    private func configureSession(position: AVCaptureDevice.Position, hd: Bool) {
+    private func settingsDidChange(from old: Settings) {
+        // Format changes would alter the recorded frame size / timing: ignore while recording.
+        if isRecording && settings.format != old.format {
+            settings.format = old.format
+        }
+        // Moving any tape control makes the look "custom".
+        if !applyingLook && settings.tape.lookIndex != nil {
+            var a = settings.tape, b = old.tape
+            a.lookIndex = nil; b.lookIndex = nil
+            if a != b { settings.tape.lookIndex = nil }
+        }
+
+        let new = settings
+        Self.save(new, key: "vhscam.settings")
+        pushParams()
+
+        let f = new.format
+        let o = old.format
+        if f != o { mediaQueue.async { self.mediaFormat = f } }
+
+        if f.camera != o.camera || f.resolution != o.resolution {
+            reconfigure()
+        } else {
+            if f.fps != o.fps {
+                sessionQueue.async { self.applyFrameRate(f.fps) }
+            }
+            if f.stabilization != o.stabilization {
+                sessionQueue.async {
+                    self.wantsStabilization = f.stabilization
+                    self.applyConnection()
+                }
+            }
+        }
+        if f.orientation != o.orientation {
+            updateOrientation()
+            refreshInterfaceMask()
+        }
+    }
+
+    private func pushParams() {
+        guard let handle else { return }
+        let t = settings.tape
+        var p = NtscParams(
+            vhs_on: t.vhsOn ? 1 : 0,
+            tape_speed: Int32(t.tapeSpeed),
+            filter_type: Int32(t.filter.rawValue),
+            snow_on: t.snowOn ? 1 : 0,
+            grain: Float(t.grain),
+            color: Float(t.color),
+            tracking: Float(t.tracking),
+            softness: Float(t.softness),
+            composite_noise: Float(t.compositeNoise),
+            snow: Float(t.snow),
+            vignette: Float(t.vignette),
+            tint_r: Float(t.tintR), tint_g: Float(t.tintG), tint_b: Float(t.tintB),
+            contrast: Float(t.contrast),
+            film_grain: Float(t.filmGrain))
+        ntsc_set_params(handle, &p)
+    }
+
+    // MARK: Looks and presets
+
+    func select(look index: Int) {
+        guard Look.all.indices.contains(index) else { return }
+        applyingLook = true
+        var s = settings
+        s.tape.apply(Look.all[index], index: index)
+        settings = s
+        applyingLook = false
+    }
+
+    func saveSlot(_ i: Int) {
+        guard slots.indices.contains(i) else { return }
+        slots[i] = settings
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        toast("Saved to P\(i + 1)")
+    }
+
+    func loadSlot(_ i: Int) {
+        guard slots.indices.contains(i) else { return }
+        guard var s = slots[i] else { toast("P\(i + 1) is empty · long-press to save"); return }
+        if isRecording { s.format = settings.format }   // keep the frame size while recording
+        applyingLook = true
+        settings = s
+        applyingLook = false
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        toast("Loaded P\(i + 1)")
+    }
+
+    func clearSlot(_ i: Int) {
+        guard slots.indices.contains(i) else { return }
+        slots[i] = nil
+    }
+
+    func resetSettings() {
+        applyingLook = true
+        var s = Settings()
+        if isRecording { s.format = settings.format }
+        settings = s
+        applyingLook = false
+    }
+
+    // MARK: Session configuration (sessionQueue)
+
+    private func configureSession(format: FormatSettings) {
         session.beginConfiguration()
 
         if let old = videoInput { session.removeInput(old); videoInput = nil }
         guard
-            let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position),
+            let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: format.camera.position),
             let input = try? AVCaptureDeviceInput(device: device),
             session.canAddInput(input)
         else {
@@ -151,8 +257,11 @@ final class CameraManager: NSObject, ObservableObject,
         session.addInput(input)
         videoInput = input
 
-        let preset: AVCaptureSession.Preset = hd ? .hd1280x720 : .vga640x480
-        if session.canSetSessionPreset(preset) { session.sessionPreset = preset }
+        if session.canSetSessionPreset(format.resolution.preset) {
+            session.sessionPreset = format.resolution.preset
+        } else {
+            toast("\(format.resolution.rawValue) isn't available on this camera")
+        }
 
         if !outputsAdded {
             videoOutput.videoSettings = [
@@ -177,40 +286,92 @@ final class CameraManager: NSObject, ObservableObject,
             outputsAdded = true
         }
 
-        applyOrientation()
+        applyConnection()
         session.commitConfiguration()
 
-        // 30 fps keeps the effect real-time.
-        if (try? device.lockForConfiguration()) != nil {
-            device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
-            device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
-            device.unlockForConfiguration()
+        // A new preset/camera resets the frame duration, so set it again.
+        applyFrameRate(format.fps)
+    }
+
+    private func reconfigure() {
+        let f = settings.format
+        sessionQueue.async {
+            self.wantsStabilization = f.stabilization
+            self.configureSession(format: f)
         }
+    }
+
+    private func supports(_ fps: Double, _ device: AVCaptureDevice) -> Bool {
+        device.activeFormat.videoSupportedFrameRateRanges.contains {
+            $0.minFrameRate <= fps + 0.01 && fps - 0.01 <= $0.maxFrameRate
+        }
+    }
+
+    /// Must run on sessionQueue.
+    private func applyFrameRate(_ rate: FrameRate) {
+        guard let device = videoInput?.device else { return }
+        var chosen = rate
+        if !supports(rate.fps, device) {
+            toast("\(rate.rawValue) fps isn't available at this resolution")
+            chosen = .vhs
+            guard supports(chosen.fps, device) else { return }
+        }
+        do {
+            try device.lockForConfiguration()
+            device.activeVideoMinFrameDuration = chosen.frameDuration
+            device.activeVideoMaxFrameDuration = chosen.frameDuration
+            device.unlockForConfiguration()
+        } catch {}
     }
 
     // MARK: Orientation
 
     @objc private func deviceOrientationChanged() {
+        noteDeviceOrientation()
         guard !isRecording else { return }   // keep buffer size constant while recording
         updateOrientation()
     }
 
-    private func updateOrientation() {
-        let orientation: AVCaptureVideoOrientation
-        switch UIDevice.current.orientation {
-        case .portrait:        orientation = .portrait
-        case .landscapeLeft:   orientation = .landscapeRight   // device/capture landscape are mirrored names
-        case .landscapeRight:  orientation = .landscapeLeft
-        default: return                                       // upside down, flat, unknown: keep current
+    private func noteDeviceOrientation() {
+        let o = UIDevice.current.orientation
+        if o == .portrait || o == .landscapeLeft || o == .landscapeRight { lastDeviceOrientation = o }
+    }
+
+    private func windowScene() -> UIWindowScene? {
+        UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+    }
+
+    private func deviceBasedOrientation() -> AVCaptureVideoOrientation {
+        switch lastDeviceOrientation {
+        case .landscapeLeft:  return .landscapeRight   // device/capture landscape names are mirrored
+        case .landscapeRight: return .landscapeLeft
+        default:              return .portrait
         }
+    }
+
+    private func computeCaptureOrientation() -> AVCaptureVideoOrientation {
+        switch settings.format.orientation {
+        case .portrait:
+            return .portrait
+        case .auto:
+            return deviceBasedOrientation()
+        case .landscape:
+            let d = deviceBasedOrientation()
+            if d != .portrait { return d }
+            return windowScene()?.interfaceOrientation == .landscapeLeft ? .landscapeLeft : .landscapeRight
+        }
+    }
+
+    private func updateOrientation() {
+        let orientation = computeCaptureOrientation()
         sessionQueue.async {
             self.captureOrientation = orientation
-            self.applyOrientation()
+            self.applyConnection()
         }
     }
 
     /// Must run on sessionQueue (or inside session configuration).
-    private func applyOrientation() {
+    private func applyConnection() {
         guard let connection = videoOutput.connection(with: .video) else { return }
         if connection.isVideoOrientationSupported {
             connection.videoOrientation = captureOrientation
@@ -220,55 +381,53 @@ final class CameraManager: NSObject, ObservableObject,
             connection.automaticallyAdjustsVideoMirroring = false
             connection.isVideoMirrored = false
         }
+        if connection.isVideoStabilizationSupported {
+            connection.preferredVideoStabilizationMode = wantsStabilization ? .auto : .off
+        }
     }
 
-    private func reconfigure() {
-        let pos = position
-        let hd = useHD
-        sessionQueue.async { self.configureSession(position: pos, hd: hd) }
+    private func interfaceMask(_ o: UIInterfaceOrientation?) -> UIInterfaceOrientationMask {
+        switch o {
+        case .landscapeLeft:  return .landscapeLeft
+        case .landscapeRight: return .landscapeRight
+        case .portraitUpsideDown: return .portraitUpsideDown
+        default: return .portrait
+        }
+    }
+
+    /// Decides which interface orientations the app allows: frozen while recording,
+    /// otherwise driven by the Orientation setting.
+    private func refreshInterfaceMask() {
+        DispatchQueue.main.async {
+            let scene = self.windowScene()
+            let mask: UIInterfaceOrientationMask
+            if self.isRecording {
+                mask = self.interfaceMask(scene?.interfaceOrientation)
+            } else {
+                switch self.settings.format.orientation {
+                case .auto:      mask = [.portrait, .landscapeLeft, .landscapeRight]
+                case .portrait:  mask = .portrait
+                case .landscape: mask = .landscape
+                }
+            }
+            AppDelegate.orientationMask = mask
+            scene?.windows.first?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+            if !self.isRecording, let scene, !mask.contains(self.interfaceMask(scene.interfaceOrientation)) {
+                scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { _ in }
+            }
+            UIViewController.attemptRotationToDeviceOrientation()
+            if !self.isRecording {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.updateOrientation() }
+            }
+        }
     }
 
     func switchCamera() {
         guard !isRecording else { return }
-        position = (position == .back) ? .front : .back
-        reconfigure()
+        settings.format.camera = (settings.format.camera == .back) ? .front : .back
     }
 
-    func setHD(_ hd: Bool) {
-        guard !isRecording, hd != useHD else { return }
-        useHD = hd
-        reconfigure()
-    }
-
-    // MARK: Looks and tape controls
-
-    func select(look index: Int) {
-        guard Self.looks.indices.contains(index) else { return }
-        let look = Self.looks[index]
-        applyingLook = true
-        grain = look.grain
-        color = look.color
-        tracking = look.tracking
-        softness = look.softness
-        tapeSpeed = look.tape
-        applyingLook = false
-        selectedLook = index
-        pushParams()
-    }
-
-    private func controlChanged() {
-        guard !applyingLook else { return }
-        selectedLook = nil
-        pushParams()
-    }
-
-    private func pushParams() {
-        guard let handle else { return }
-        ntsc_set_params(handle, Float(grain), Float(color), Float(tracking),
-                        Float(softness), Int32(tapeSpeed))
-    }
-
-    // MARK: Frame processing
+    // MARK: Frame processing (mediaQueue)
 
     func captureOutput(_ output: AVCaptureOutput,
                        didOutput sampleBuffer: CMSampleBuffer,
@@ -277,7 +436,20 @@ final class CameraManager: NSObject, ObservableObject,
             appendAudio(sampleBuffer)
             return
         }
-        guard let handle, let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        guard let handle, let source = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        var pixelBuffer = source
+        var displayBuffer = sampleBuffer
+        if mediaFormat.aspect == .square {
+            let sw = CVPixelBufferGetWidth(source), sh = CVPixelBufferGetHeight(source)
+            let side = min(sw, sh) & ~1
+            if sw != side || sh != side {
+                guard let cropped = croppedBuffer(from: source, side: side),
+                      let sb = makeSampleBuffer(cropped, timing: sampleBuffer) else { return }
+                pixelBuffer = cropped
+                displayBuffer = sb
+            }
+        }
 
         CVPixelBufferLockBaseAddress(pixelBuffer, [])
         if let base = CVPixelBufferGetBaseAddress(pixelBuffer) {
@@ -293,9 +465,61 @@ final class CameraManager: NSObject, ObservableObject,
         CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
         frameCounter &+= 1
 
-        show(sampleBuffer)
+        show(displayBuffer)
         record(pixelBuffer, time: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
         capturePhotoIfRequested(pixelBuffer)
+    }
+
+    /// Center-crops a BGRA buffer to `side` x `side`.
+    private func croppedBuffer(from src: CVPixelBuffer, side: Int) -> CVPixelBuffer? {
+        if cropPool == nil || cropSide != side {
+            let attrs: [String: Any] = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: side,
+                kCVPixelBufferHeightKey as String: side,
+                kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any]()
+            ]
+            var pool: CVPixelBufferPool?
+            CVPixelBufferPoolCreate(nil, nil, attrs as CFDictionary, &pool)
+            cropPool = pool
+            cropSide = side
+        }
+        guard let cropPool else { return nil }
+        var out: CVPixelBuffer?
+        CVPixelBufferPoolCreatePixelBuffer(nil, cropPool, &out)
+        guard let dst = out else { return nil }
+
+        CVPixelBufferLockBaseAddress(src, .readOnly)
+        CVPixelBufferLockBaseAddress(dst, [])
+        defer {
+            CVPixelBufferUnlockBaseAddress(src, .readOnly)
+            CVPixelBufferUnlockBaseAddress(dst, [])
+        }
+        guard let sBase = CVPixelBufferGetBaseAddress(src),
+              let dBase = CVPixelBufferGetBaseAddress(dst) else { return nil }
+        let sStride = CVPixelBufferGetBytesPerRow(src)
+        let dStride = CVPixelBufferGetBytesPerRow(dst)
+        let x0 = (CVPixelBufferGetWidth(src) - side) / 2
+        let y0 = (CVPixelBufferGetHeight(src) - side) / 2
+        for y in 0..<side {
+            memcpy(dBase + y * dStride, sBase + (y + y0) * sStride + x0 * 4, side * 4)
+        }
+        return dst
+    }
+
+    private func makeSampleBuffer(_ pixelBuffer: CVPixelBuffer, timing source: CMSampleBuffer) -> CMSampleBuffer? {
+        var format: CMVideoFormatDescription?
+        CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: pixelBuffer,
+                                                     formatDescriptionOut: &format)
+        guard let format else { return nil }
+        var timing = CMSampleTimingInfo(duration: CMSampleBufferGetDuration(source),
+                                        presentationTimeStamp: CMSampleBufferGetPresentationTimeStamp(source),
+                                        decodeTimeStamp: .invalid)
+        var out: CMSampleBuffer?
+        CMSampleBufferCreateReadyWithImageBuffer(allocator: nil, imageBuffer: pixelBuffer,
+                                                 formatDescription: format, sampleTiming: &timing,
+                                                 sampleBufferOut: &out)
+        return out
     }
 
     private func show(_ sampleBuffer: CMSampleBuffer) {
@@ -338,8 +562,8 @@ final class CameraManager: NSObject, ObservableObject,
     }
 
     private func startRecording() {
-        lockInterfaceOrientation(true)
         isRecording = true
+        refreshInterfaceMask()
         recordingSeconds = 0
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -351,7 +575,7 @@ final class CameraManager: NSObject, ObservableObject,
     func stopRecording() {
         guard isRecording else { return }
         isRecording = false
-        lockInterfaceOrientation(false)
+        refreshInterfaceMask()
         updateOrientation()
         timer?.invalidate()
         timer = nil
@@ -386,7 +610,7 @@ final class CameraManager: NSObject, ObservableObject,
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: width,
             AVVideoHeightKey: height,
-            AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: width * height * 10]
+            AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: max(2_000_000, width * height * 10)]
         ]
         let vIn = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         vIn.expectsMediaDataInRealTime = true
@@ -454,21 +678,6 @@ final class CameraManager: NSObject, ObservableObject,
     }
 
     // MARK: Helpers
-
-    /// While recording, freeze the UI orientation so it always matches the (fixed-size) video.
-    private func lockInterfaceOrientation(_ lock: Bool) {
-        if lock {
-            let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene
-            switch scene?.interfaceOrientation {
-            case .landscapeLeft:  AppDelegate.orientationMask = .landscapeLeft
-            case .landscapeRight: AppDelegate.orientationMask = .landscapeRight
-            default:              AppDelegate.orientationMask = .portrait
-            }
-        } else {
-            AppDelegate.orientationMask = [.portrait, .landscapeLeft, .landscapeRight]
-            UIViewController.attemptRotationToDeviceOrientation()
-        }
-    }
 
     private func toast(_ message: String) {
         DispatchQueue.main.async {
