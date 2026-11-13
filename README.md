@@ -1,4 +1,4 @@
-# VHS Cam (iOS)
+# VHS RetroCam (iOS)
 
 A camera app that runs the [ntsc-rs](https://github.com/ntsc-rs/ntsc-rs) VHS effect on live video.
 

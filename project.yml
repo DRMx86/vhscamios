@@ -19,7 +19,7 @@ targets:
     info:
       path: VHSCam/Info.plist
       properties:
-        CFBundleDisplayName: VHS Cam
+        CFBundleDisplayName: VHS RetroCam
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
@@ -29,9 +29,9 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         UIRequiredDeviceCapabilities:
           - arm64
-        NSCameraUsageDescription: VHS Cam uses the camera to apply a live VHS effect.
-        NSMicrophoneUsageDescription: VHS Cam records audio together with your VHS video.
-        NSPhotoLibraryAddUsageDescription: VHS Cam saves your VHS photos and videos to your library.
+        NSCameraUsageDescription: VHS RetroCam uses the camera to apply a live VHS effect.
+        NSMicrophoneUsageDescription: VHS RetroCam records audio together with your VHS video.
+        NSPhotoLibraryAddUsageDescription: VHS RetroCam saves your VHS photos and videos to your library.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.drmx86.vhscam
