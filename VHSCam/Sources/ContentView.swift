@@ -359,6 +359,10 @@ struct SettingsView: View {
                 Section {
                     Button("Reset all settings", role: .destructive) { cam.resetSettings() }
                 }
+
+                Section {
+                    NavigationLink("About") { AboutView() }
+                }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -430,5 +434,22 @@ struct SettingsView: View {
             if let data = try? Data(contentsOf: url), cam.importPreset(data, into: i) { return }
             cam.toast("That isn't a valid .drm preset")
         }
+    }
+}
+
+// MARK: - About
+
+struct AboutView: View {
+    var body: some View {
+        VStack(spacing: 8) {
+            Text("VHS RetroCam")
+                .font(.system(.title2, design: .monospaced).weight(.bold))
+            Text("2026 drmascarina")
+                .font(.system(.callout, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .navigationTitle("About")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
