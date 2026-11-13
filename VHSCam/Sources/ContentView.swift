@@ -319,11 +319,15 @@ struct SettingsView: View {
                 } header: {
                     Text("My presets")
                 } footer: {
-                    Text("A preset stores the look, tape controls and format. Rename or clear it here. Long-press P1–P3 on the camera screen to save.")
+                    Text("A preset stores the look, tape controls and format. Tap a Preset button to save the current settings into that slot. Tap P1–P3 on the camera screen to load one.")
                 }
 
                 Section {
                     Button("Reset all settings", role: .destructive) { cam.resetSettings() }
+                }
+
+                Section {
+                    NavigationLink("About") { AboutView() }
                 }
             }
             .navigationTitle("Settings")
@@ -356,12 +360,26 @@ struct SettingsView: View {
                 Text(p.settings.summary).font(.footnote).foregroundStyle(.secondary)
             }
             HStack {
-                Button("Save current") { cam.saveSlot(i) }.buttonStyle(.bordered)
-                Button("Load") { cam.loadSlot(i) }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(preset == nil)
+                Button("Preset \(i + 1)") { cam.saveSlot(i) }.buttonStyle(.bordered)
             }
         }
         .padding(.vertical, 2)
+    }
+}
+
+// MARK: - About
+
+struct AboutView: View {
+    var body: some View {
+        VStack(spacing: 8) {
+            Text("VHS RetroCam")
+                .font(.system(.title2, design: .monospaced).weight(.bold))
+            Text("2026 drmascarina")
+                .font(.system(.callout, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .navigationTitle("About")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
