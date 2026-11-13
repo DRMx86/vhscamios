@@ -3,7 +3,6 @@ import SwiftUI
 struct EditorView: View {
     @ObservedObject var model: EditorModel
     @ObservedObject var cam: CameraManager
-    @ObservedObject private var exporter = Exporter.shared
     @Environment(\.dismiss) private var dismiss
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var activeSlot: Int?
@@ -100,7 +99,7 @@ struct EditorView: View {
 
             TapeControlsView(tape: $model.tape, locked: model.isRendering)
 
-            Text("Saves to: \(exporter.destinationSummary) · \(model.isVideo ? "preview shows one frame; Render does the whole clip" : "photo")")
+            Text("Saves to: \(Exporter.shared.destinationSummary) · \(model.isVideo ? "preview shows one frame; Render does the whole clip" : "photo")")
                 .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }

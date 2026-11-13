@@ -1,6 +1,5 @@
 import SwiftUI
 import PhotosUI
-import UniformTypeIdentifiers
 
 struct ContentView: View {
     @StateObject private var cam = CameraManager()
@@ -282,18 +281,7 @@ struct ContentView: View {
 
 struct SettingsView: View {
     @ObservedObject var cam: CameraManager
-    @ObservedObject private var exporter = Exporter.shared
     @Environment(\.dismiss) private var dismiss
-
-    private enum ImportTarget { case folder, preset(Int) }
-    @State private var showImporter = false
-    @State private var importTarget: ImportTarget = .folder
-    @State private var shareItem: ShareItem?
-
-    private var importTypes: [UTType] {
-        if case .folder = importTarget { return [.folder] }
-        return [.data]   // .drm is a custom extension, so allow any file and validate the contents
-    }
 
     var body: some View {
         NavigationStack {
@@ -327,33 +315,11 @@ struct SettingsView: View {
                 .disabled(cam.isRecording)
 
                 Section {
-                    Toggle("Save to Photos", isOn: $exporter.saveToPhotos)
-                    Toggle("Save to folder", isOn: $exporter.saveToFolder).disabled(!exporter.hasFolder)
-                    Button {
-                        importTarget = .folder
-                        showImporter = true
-                    } label: {
-                        HStack {
-                            Text(exporter.hasFolder ? "Folder: \(exporter.folderName ?? "")" : "Choose folder…")
-                            Spacer()
-                            Image(systemName: "folder")
-                        }
-                    }
-                    if exporter.hasFolder {
-                        Button("Stop using this folder", role: .destructive) { exporter.clearFolder() }
-                    }
-                } header: {
-                    Text("Save location")
-                } footer: {
-                    Text("Pick any folder in Files: iCloud Drive, On My iPhone, or a USB drive plugged into the phone. Recordings are copied there after you stop. If the folder can't be reached (drive unplugged), the file goes to Photos instead so nothing is lost.")
-                }
-
-                Section {
                     ForEach(0..<3, id: \.self) { presetRow($0) }
                 } header: {
                     Text("My presets")
                 } footer: {
-                    Text("A preset stores the look, tape controls and format. Rename it here, or use the ⋯ menu to save it as a .drm file (to Files / a USB drive / AirDrop) or import one. Long-press P1–P3 on the camera screen to save.")
+                    Text("A preset stores the look, tape controls and format. Rename or clear it here. Long-press P1–P3 on the camera screen to save.")
                 }
 
                 Section {
@@ -363,8 +329,6 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-            .fileImporter(isPresented: $showImporter, allowedContentTypes: importTypes) { handleImport($0) }
-            .sheet(item: $shareItem) { ShareSheet(url: $0.url) }
         }
     }
 
@@ -381,29 +345,11 @@ struct SettingsView: View {
                     Text("Empty").foregroundStyle(.secondary)
                     Spacer()
                 }
-                Menu {
-                    if let p = preset {
-                        Button { if let url = cam.presetFile(i) { shareItem = ShareItem(url: url) } } label: {
-                            Label("Save / share .drm file…", systemImage: "square.and.arrow.up")
-                        }
-                        if exporter.hasFolder {
-                            Button {
-                                if let url = cam.presetFile(i) {
-                                    let ok = exporter.copyToFolder(url, name: p.fileName)
-                                    cam.toast(ok ? "Saved \(p.fileName) to \(exporter.folderName ?? "folder")" : "Folder unavailable")
-                                }
-                            } label: { Label("Save .drm to \(exporter.folderName ?? "folder")", systemImage: "folder") }
-                        }
+                if preset != nil {
+                    Button(role: .destructive) { cam.clearSlot(i) } label: {
+                        Image(systemName: "trash").font(.title3)
                     }
-                    Button {
-                        importTarget = .preset(i)
-                        showImporter = true
-                    } label: { Label("Import .drm file…", systemImage: "square.and.arrow.down") }
-                    if preset != nil {
-                        Button(role: .destructive) { cam.clearSlot(i) } label: { Label("Clear", systemImage: "trash") }
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle").font(.title3)
+                    .buttonStyle(.borderless)
                 }
             }
             if let p = preset {
@@ -417,18 +363,5 @@ struct SettingsView: View {
             }
         }
         .padding(.vertical, 2)
-    }
-
-    private func handleImport(_ result: Result<URL, Error>) {
-        guard case .success(let url) = result else { return }
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        switch importTarget {
-        case .folder:
-            if !exporter.setFolder(url) { cam.toast("Couldn't use that folder") }
-        case .preset(let i):
-            if let data = try? Data(contentsOf: url), cam.importPreset(data, into: i) { return }
-            cam.toast("That isn't a valid .drm preset")
-        }
     }
 }

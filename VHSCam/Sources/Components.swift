@@ -140,19 +140,6 @@ struct PresetPicker: View {
 
 // MARK: - Misc
 
-struct ShareItem: Identifiable {
-    let id = UUID()
-    let url: URL
-}
-
-struct ShareSheet: UIViewControllerRepresentable {
-    let url: URL
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: [url], applicationActivities: nil)
-    }
-    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
-}
-
 /// A video picked from the photo library, copied to a temp file so AVFoundation can read it.
 struct PickedMovie: Transferable {
     let url: URL

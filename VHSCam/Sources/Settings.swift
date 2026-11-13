@@ -154,30 +154,11 @@ struct Settings: Codable, Equatable {
     }
 }
 
-/// A named, saveable preset. Stored in the 3 slots and exported as a ".drm" file (JSON).
+/// A named, saveable preset, stored in the 3 slots.
 struct Preset: Codable, Equatable {
     var version = 1
     var name: String
     var settings: Settings
 
     var displayName: String { name.trimmingCharacters(in: .whitespaces).isEmpty ? "Preset" : name }
-
-    func fileData() -> Data? {
-        let e = JSONEncoder()
-        e.outputFormatting = [.prettyPrinted, .sortedKeys]
-        return try? e.encode(self)
-    }
-
-    /// Accepts a .drm file, or a bare Settings JSON.
-    static func decode(_ data: Data) -> Preset? {
-        let d = JSONDecoder()
-        if let p = try? d.decode(Preset.self, from: data) { return p }
-        if let s = try? d.decode(Settings.self, from: data) { return Preset(name: "Imported", settings: s) }
-        return nil
-    }
-
-    var fileName: String {
-        let cleaned = displayName.map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" ? $0 : "_" }
-        return String(cleaned).trimmingCharacters(in: CharacterSet(charactersIn: "_")) + ".drm"
-    }
 }

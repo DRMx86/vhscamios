@@ -16,7 +16,7 @@ final class CameraManager: NSObject, ObservableObject,
     @Published var settings: Settings = CameraManager.load(Settings.self, key: "vhscam.settings.v2") ?? Settings() {
         didSet { settingsDidChange(from: oldValue) }
     }
-    /// Three named preset slots (full settings: format + tape). Exportable as ".drm" files.
+    /// Three named preset slots (full settings: format + tape).
     @Published var slots: [Preset?] = CameraManager.load([Preset?].self, key: "vhscam.presets.v1") ?? [nil, nil, nil] {
         didSet { Self.save(slots, key: "vhscam.presets.v1") }
     }
@@ -227,22 +227,6 @@ final class CameraManager: NSObject, ObservableObject,
         guard slots.indices.contains(i) else { return }
         slots[i] = nil
         if activeSlot == i { activeSlot = nil }
-    }
-
-    /// Writes the preset to a temporary ".drm" file for sharing / saving to Files.
-    func presetFile(_ i: Int) -> URL? {
-        guard slots.indices.contains(i), let p = slots[i], let data = p.fileData() else { return nil }
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(p.fileName)
-        try? FileManager.default.removeItem(at: url)
-        return (try? data.write(to: url)) != nil ? url : nil
-    }
-
-    /// Imports a ".drm" file into slot `i`.
-    func importPreset(_ data: Data, into i: Int) -> Bool {
-        guard slots.indices.contains(i), let p = Preset.decode(data) else { return false }
-        slots[i] = p
-        toast("Imported \(p.displayName) to P\(i + 1)")
-        return true
     }
 
     func resetSettings() {

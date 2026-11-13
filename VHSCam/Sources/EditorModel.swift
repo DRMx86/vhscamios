@@ -3,7 +3,7 @@ import AVFoundation
 import CoreImage
 
 /// Re-renders an existing photo or video from the library with the VHS effect:
-/// live preview (a still frame, processed on every change) and a full render to Photos / folder.
+/// live preview (a still frame, processed on every change) and a full render to Photos.
 final class EditorModel: ObservableObject, Identifiable {
     let id = UUID()
     let isVideo: Bool
